@@ -84,8 +84,9 @@ class OllamaResponseError(OllamaError):
 
         Args:
             message: Human-readable description naming the failed operation.
-            status_code: HTTP status, or None if the failure was not an HTTP
-                status (for example a 200 with an unparseable body).
+            status_code: The status the response arrived with — including a 2xx
+                whose body turned out to be unusable — or None when no status
+                was received at all, as when the reply was not valid HTTP.
             body: The response body as text, truncated by the caller if need be.
         """
         super().__init__(message)
