@@ -427,3 +427,56 @@ and the configured Ollama host answers `/api/version`.
   every sample to 255 — so its bytes are reinterpreted as the explicit
   byte-order mode this machine uses (`sys.byteorder`) and it keeps full
   precision like the other two.
+
+### Errata (2026-08-20, found during unit 2)
+
+- §4: `OllamaClient` is also exported from the package, and `Describer` /
+  `describe()` accept a keyword-only `client=` argument. Both exist as a test
+  seam (the suite drives the real `urllib` path against an in-process HTTP
+  server and needs to inject a client bound to it); they are supported public
+  surface but not part of the "simple API" story.
+- §2.2: `OllamaClient(host=...)` defaults to the static
+  `http://localhost:11434`; `$OLLAMA_HOST` and `$DESCRIBE_IT_MODEL` are
+  resolved only by `Describer` / `describe()`, at call time. The transport
+  never reads ambient configuration.
+- §2.2/§2.3: `max_words < 1`, `timeout <= 0`, and `host=""` raise
+  `ValueError` at construction.
+- §2.3: `/api/pull` answers `200` and then an NDJSON `{"error": ...}` line
+  for a model that does not exist upstream; `ensure_model()` surfaces that as
+  `OllamaResponseError`, not `ModelNotFoundError` (which is reserved for "not
+  present on this server").
+- §2.7: `OllamaResponseError.status_code` is `None` only when `open()` never
+  returned a response — the reply was not HTTP at all, or `http.client`
+  rejected it before handing one back (a malformed status line, a header line
+  over its length limit, more than 100 headers), all of which surface as an
+  `http.client.HTTPException`. Once a response is in hand its status is
+  reported, both for an unparseable 2xx body and for a body cut short of its
+  declared `Content-Length`. `ModelNotFoundError`'s message names the model and
+  the `ollama pull` remedy but not the host or operation.
+- §5: proxy environment variables (`$http_proxy` and friends) are ignored. The
+  client builds one private `OpenerDirector` per instance with an empty
+  `ProxyHandler`, because Ollama is a local service and urllib's proxy support
+  exempts nothing — not even loopback — so a machine-wide corporate proxy would
+  otherwise capture traffic that `ollama` itself sends direct.
+- §5: redirects are not followed. That same private opener has no
+  `HTTPRedirectHandler`, because urllib follows a 30x by rewriting a redirected
+  POST into a body-less GET — the image would silently not be sent. A 3xx is
+  reported as `OllamaResponseError` naming the `Location` it points at; a
+  `Location` on any other status is ignored, since error pages carry one too.
+- §2.2: a scheme-less `host` gets `http://` and, when no port is given, 11434
+  — matching Ollama's `OLLAMA_HOST` parsing; a `host` with an explicit scheme is
+  used as written, so `http://ollama.example.com` keeps meaning port 80 rather
+  than gaining a port of ours. An explicit port is always kept, and so is a path
+  (an Ollama mounted under a prefix). A `host` carrying userinfo, a query string
+  or a fragment raises `ValueError` — including an empty `?` or `#`, which parse
+  away but leave behind the slash that introduced them — as does one whose
+  scheme is neither `http` nor `https`, or whose port is unreadable. The
+  credentials message does not quote the host back, so a password cannot reach
+  a log through it.
+- §2.2/§2.3: `timeout` validation lives in `OllamaClient` (`TypeError` if it is
+  not a real number, `ValueError` if it is not positive and finite — `inf` is a
+  hang with extra steps and `nan` loses every comparison), and `Describer`
+  inherits it by constructing the client; passing `client=` therefore skips it
+  along with `host`. `model` must not be blank after stripping (`ValueError`),
+  a blank `$DESCRIBE_IT_MODEL` counts as unset exactly as a blank `$OLLAMA_HOST`
+  does, and `max_words` must be an `int` and not a `bool` (`TypeError`).
