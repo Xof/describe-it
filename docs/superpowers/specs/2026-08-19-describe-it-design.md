@@ -142,11 +142,12 @@ Applied in order to `message.content`:
 4. If the result is empty → `DescriptionError("model returned no text")`.
 5. If the result matches the refusal heuristic — case-insensitive match of
    `^(i'?m sorry|i cannot|i can'?t|i am unable|i'?m unable|i apologi[sz]e|as an ai)`
-   against the first 80 characters — → `DescriptionRefusedError`, carrying
-   the raw text as `.response`. This is a heuristic and is documented as
-   such; it converts the common "I'm sorry, but I can't describe this
-   image" failure into an exception instead of garbage alt text. Callers who
-   want the raw text can read it off the exception.
+   at the very start of the cleaned text, subject to the guard in §8 Q4 —
+   → `DescriptionRefusedError`, carrying the cleaned text as `.response`.
+   This is a heuristic and is documented as such; it converts the common
+   "I'm sorry, but I can't describe this image" failure into an exception
+   instead of garbage alt text. Callers who want the text anyway can read it
+   off the exception.
 6. Return the string.
 
 No sentence-level truncation is performed. If a model overruns `max_words`,
@@ -168,7 +169,7 @@ DescribeItError
 │   ├── ModelNotFoundError     HTTP 404 whose body mentions the model; message includes `ollama pull <model>`
 │   └── OllamaResponseError    any other non-2xx, or a 2xx whose body is not the expected JSON shape; `.status_code` and `.body` attributes
 └── DescriptionError           server answered but produced no usable description
-    └── DescriptionRefusedError  refusal heuristic fired; `.response` holds raw text
+    └── DescriptionRefusedError  refusal heuristic fired; `.response` holds the cleaned text
 ```
 
 Every wrapped lower-level exception (`urllib.error.URLError`,
@@ -270,12 +271,14 @@ target moves from `describe_it:main` to `describe_it.cli:main`).
   collapse; idempotence (`clean(clean(x)) == clean(x)` for every case).
 - Empty / whitespace-only / think-block-only → `DescriptionError`.
 - Each refusal prefix in the heuristic → `DescriptionRefusedError` with
-  `.response` equal to the cleaned text. Guard cases: "I cannot see any
-  people, only a dog on a beach, with a long pier stretching behind it into
-  the fog." (period before char 60, ≥200 chars is not required — the guard
-  is an OR) passes through as a description; "I'm sorry, but I can't help
-  with that." raises; a 250-character refusal whose first period is at char
-  80 raises (no period before 60).
+  `.response` equal to the cleaned text. Guard cases (the guard is an OR:
+  raise if shorter than 200 chars OR no "." before index 60): "I'm sorry,
+  but I can't help with that." raises (short); a 250-character refusal whose
+  first period is at char 80 raises (no early period); a ≥200-character
+  description whose first sentence ends before char 60 passes through even
+  though it opens with "I cannot see any people"; a *short* description
+  opening with such a phrase is treated as a refusal — accepted cost, since
+  the prompt forbids that opening and refusals are the common case.
 
 `tests/test_client.py` — against an in-process `http.server` fixture that
 records requests and returns scripted responses:
@@ -360,3 +363,67 @@ and the configured Ollama host answers `/api/version`.
   like a refusal sentence, not a description that happens to start with
   "I cannot see…". Accept, or drop the heuristic entirely and let refusals
   through as plain strings?
+
+### Resolutions (2026-08-19)
+
+- **Q1:** `qwen3.5:4b` is the default model.
+- **Q2:** Private repository `github.com/Xof/describe-it`; work lands as a
+  stack of PRs with GitHub Actions CI.
+- **Q3:** `requires-python = ">=3.12"`; CI matrix 3.12 / 3.13 / 3.14.
+- **Q4:** Guarded refusal heuristic: fire only when a refusal phrase starts
+  the cleaned text *and* (the text is under 200 characters *or* it has no "."
+  before index 60). `DescriptionRefusedError.response` carries the cleaned
+  text.
+
+### Errata (2026-08-20, found during unit 1)
+
+- §2.6 step 5 originally said "against the first 80 characters" and "raw
+  text"; corrected above to the start-anchored, guarded rule and cleaned text.
+- §6.1's refusal guard example originally described a 99-character text as
+  passing through; under the OR guard it raises. Example replaced.
+- "One layer" of decoration stripping (§2.6 step 2) is not idempotent, which
+  §6.1 requires; the implementation strips to a fixed point instead.
+- Unspecified and now decided: `max_image_size <= 0` raises `ValueError`;
+  wide modes (`I`, `I;16`, `F`) are normalised against the image's own
+  min/max before conversion to 8-bit (a constant image maps to black), because
+  `Image.convert("RGB")` clips 16-bit data to white.
+- EXIF orientation is honoured: `ImageOps.exif_transpose` runs as a new step
+  before §2.4 step 1, and only when the image carries an orientation other
+  than 1. Output carries no EXIF.
+- The refusal regex (§2.6 step 5) also accepts U+2018/U+2019 apostrophes and
+  `i am sorry`.
+- Wrapping quotes/emphasis are stripped only when balanced — the interior must
+  not contain the closing character again — so quoted text at both ends of a
+  description survives. An apostrophe between two word characters ("a child's
+  drawing") is punctuation rather than a closing quote and does not count, so
+  single-quoted text is still unwrapped.
+- Code-fence info strings and unclosed `<think>` blocks (stripped to end of
+  text) are removed during cleaning. The BOM and zero-width characters are
+  removed at the leading and trailing edges only — of the text and of each
+  decoration layer — because interior ZWJ/ZWNJ/ZWSP are orthographically
+  required by several scripts (Persian, Urdu, Hindi, Sinhala, Malayalam,
+  Thai, Khmer) and hold emoji sequences together.
+- `max_image_size` must be an `int` (not `bool`); other types raise
+  `TypeError`.
+- `prompt=""` raises `ValueError`.
+- Images whose `info["transparency"]` is set are flattened onto white in every
+  mode except the wide ones: a colour key names a raw sample value, and the
+  wide-mode rescale moves every sample, so a key on an `I`/`I;16*`/`F` image is
+  ignored and the image is described opaque. A key Pillow cannot apply (a
+  string, `None`, a mismatched tuple) is dropped — from a copy, so the caller's
+  image keeps it — and the image is described opaque. The key has to be dropped
+  before the plain `convert("RGB")` as well, because Pillow consults it again
+  on the `L` and `P` paths.
+- Non-finite samples in `F` images: normalisation is skipped, in favour of
+  Pillow's clamping conversion, only when an extremum is `inf`. `nan` is
+  handled rather than skipped: Pillow seeds its extrema scan with pixel (0, 0),
+  so a `nan` there reports a `nan` range for the whole image and the finite
+  range is rescanned from the raw samples (an image that is entirely `nan`
+  comes out black). A `nan` anywhere else never reaches the guard, because
+  Pillow's extrema skip it. `nan` pixels themselves always come out black.
+- `I;16B` / `I;16L` are normalised with `convert("I")` before rescaling,
+  because `getextrema()` and `point()` reject those modes outright. `I;16N`
+  cannot be converted — Pillow routes it through an 8-bit unpacker and clamps
+  every sample to 255 — so its bytes are reinterpreted as the explicit
+  byte-order mode this machine uses (`sys.byteorder`) and it keeps full
+  precision like the other two.
