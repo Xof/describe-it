@@ -101,7 +101,11 @@ def describe_files(
     for path in paths:
         try:
             description = describe_file(describer, path, context=context)
-        except (OSError, DescribeItError) as exc:
+        # DecompressionBombError is not an OSError and fires out of
+        # Image.open, before `prepare_image` gets the chance to wrap it: a
+        # caller who points the CLI at a 200-megapixel scan should get the same
+        # one-line report as for any other file that could not be read.
+        except (OSError, Image.DecompressionBombError, DescribeItError) as exc:
             failed = True
             print(f"describe-it: {path}: {_reason(exc)}", file=stderr)
             continue
@@ -123,6 +127,8 @@ def describe_file(describer: Describer, path: Path, *, context: str | None) -> s
     Raises:
         OSError: If the file cannot be read, or holds nothing Pillow can
             identify as an image — `PIL.UnidentifiedImageError` is an `OSError`.
+        PIL.Image.DecompressionBombError: If the image is large enough to trip
+            Pillow's bomb guard, which is checked as the file is opened.
         DescribeItError: If the image cannot be prepared, the server cannot be
             reached, or no usable description came back.
     """
@@ -133,7 +139,7 @@ def describe_file(describer: Describer, path: Path, *, context: str | None) -> s
         return describer.describe(image, context=context)
 
 
-def _reason(exc: OSError | DescribeItError) -> str:
+def _reason(exc: Exception) -> str:
     """Render one failure as a single line of diagnosis.
 
     Args:

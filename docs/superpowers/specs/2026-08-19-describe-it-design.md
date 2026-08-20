@@ -499,7 +499,10 @@ and the configured Ollama host answers `/api/version`.
   newlines and a multi-file run is read a line at a time. An `OSError` is
   reported by its `strerror` where it has one (the filename is already in the
   message); Pillow's `UnidentifiedImageError` has none and is reported whole.
-  `--version` prints `describe-it <version>`.
+  `--version` prints `describe-it <version>`. Pillow's
+  `DecompressionBombError` is reported the same way even though it is not an
+  `OSError`: it is raised by `Image.open`, before `prepare_image` could wrap
+  it, and it is a file the CLI cannot read like any other.
 - §6.2: the live tests check `$DESCRIBE_IT_INTEGRATION` *before* probing
   `/api/version`, so collecting the module during a unit run opens no socket.
   The probe uses a proxy-free opener with a 2 s timeout, matching the client's

@@ -111,6 +111,27 @@ def test_a_file_that_is_not_an_image_never_reaches_the_server(
     assert server.requests == []
 
 
+def test_an_image_that_trips_pillows_bomb_guard_is_reported(
+    server: FakeOllama,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The guard is not an OSError and fires from Image.open, so it is the one
+    # failure that would reach the user as a traceback if it were not named.
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 10)
+    path = _image_file(tmp_path)
+
+    status = cli.main(["--host", server.url, str(path)])
+
+    captured = capsys.readouterr()
+    assert status == 1
+    assert captured.out == ""
+    assert captured.err.startswith(f"describe-it: {path}: ")
+    assert "decompression bomb" in captured.err
+    assert server.requests == []
+
+
 def test_a_server_error_is_one_line_on_stderr(
     server: FakeOllama, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
