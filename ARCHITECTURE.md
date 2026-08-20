@@ -3,9 +3,11 @@
 `describe-it` turns a PIL image into an alt-text string by posting one JSON
 request to a local Ollama. Two pure layers and one HTTP client sit under a
 composer, and the dependency direction never reverses:
-`cli → describer → {image, prompt, client} → exceptions`, with `config` read by
-`cli`, `describer` and `client`. (`cli` also imports `exceptions` and PIL
-directly, to catch and to open.) Nothing is cached and nothing is global.
+`cli → describer → {image, prompt, client} → exceptions`, where `exceptions` is
+imported directly by `describer` and `cli` as well as by the layers between
+them, and `config` is read by `cli`, `describer` and `client`. `cli` also
+imports the package root (for `__version__`) and PIL (to open a file). Nothing
+is cached and nothing is global.
 
 ## Component map
 

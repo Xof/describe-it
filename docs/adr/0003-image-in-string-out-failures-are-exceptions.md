@@ -3,60 +3,67 @@ id: 0003
 title: Image in, string out, every failure an exception
 date: 2026-08-19
 status: Accepted
-summary: describe() returns a plain str and raises on every failure, with one exception hierarchy rooted at DescribeItError and TypeError/ValueError reserved for caller mistakes.
+summary: describe() returns a plain str and raises on every failure, under one hierarchy rooted at DescribeItError, with TypeError kept for a wrong-type argument.
 ---
 
 # 0003. Image in, string out, every failure an exception
 
 ## Context
 
-The library does one thing, and the shape of its API decides how much code a
-caller writes around it. A result object or a `None` return would put a status
-check between every caller and the string they actually wanted, for a call
-that either produces alt text or fails.
+From spec §1: "The API contract is deliberately minimal: **PIL image in,
+description string out, every failure is an exception.** No result objects, no
+status codes, no `None` returns."
 
-At the same time a caller does need to distinguish failures: "the server is
-not running" and "the model refused" ask for different responses, and a
-service doing this at volume wants to retry one and log the other.
+A caller still has to tell failures apart — spec §2.7 shapes the hierarchy "by
+what a caller would *do* about the failure, not by where the error happened to
+arise."
 
 ## Decision
 
-`describe(image, **options) -> str` returns a non-empty string, and every
-failure is an exception. All library failures inherit from `DescribeItError`,
-so one `except DescribeItError` catches everything; the tree branches by what
-a caller would *do* about the failure (`ImageError`, `OllamaConnectionError`,
-`OllamaTimeoutError`, `ModelNotFoundError`, `OllamaResponseError`,
-`DescriptionError`, `DescriptionRefusedError`).
+`describe(image, **options) -> str` returns a non-empty string (spec §2.1), and
+every failure is an exception. All library failures inherit from
+`DescribeItError` "so `except DescribeItError` catches everything the library
+itself raises" (spec §2.7). The tree is the one drawn in spec §2.7:
+`ImageError`, `OllamaError` with `OllamaConnectionError`, `OllamaTimeoutError`,
+`ModelNotFoundError` and `OllamaResponseError` beneath it, and
+`DescriptionError` with `DescriptionRefusedError` beneath it.
 
-Plain `TypeError` and `ValueError` are reserved for the caller's own mistakes
-— a non-image argument, `max_words=0`, a blank model tag — because those are
-programming errors, not describe-it failures, and Python callers expect the
-standard types. `Describer` is the same pipeline with the configuration
-hoisted out of the loop.
+A non-`PIL.Image.Image` argument raises plain `TypeError`, which spec §2.4
+calls "the standard Python contract for a wrong-type argument", and spec §2.7
+calls "the one deliberate exception to that rule".
+
+`Describer` is the same pipeline with the configuration hoisted out of the
+loop; module-level `describe()` is "sugar for
+`Describer(**opts).describe(image, context=..., prompt=...)`" (spec §2.3).
 
 ## Alternatives considered
 
-- **A result object (`Description(text=..., error=...)`)** — every caller
-  writes the same unwrap, and the failure that matters most (a refusal) would
-  be an attribute nobody checks. Rejected in the specification's opening
-  paragraph.
-- **`None` on failure** — loses the reason entirely and pushes the diagnosis
-  into a log the caller cannot reach.
-- **Wrapping the argument-type error too (`ImageError` for a non-image)** —
-  rejected because `except DescribeItError` would then swallow what is plainly
-  a bug in the calling code.
-- **A flat exception list** — the hierarchy costs nothing and lets a caller
-  catch `OllamaError` without enumerating its four members.
+- **Result objects, status codes, `None` returns** — all three are rejected by
+  name in spec §1.
+
+  > Rationale not recovered from project sources: §1 states the rejection
+  > without arguing it.
+
+- **Making `OllamaTimeoutError` a subclass of `OllamaConnectionError`** —
+  rejected in spec §2.7: a timeout "usually means 'model is slow', not 'server
+  is down'", so the two are siblings.
+- No other API shape was weighed in the sources.
 
 ## Consequences
 
-- A refusal is an exception rather than a plausible-looking string, which is
-  the point of `DescriptionRefusedError` (ADR 0006); the text is still
-  available on `.response` for a caller who disagrees with the heuristic.
-- `OllamaTimeoutError` is a *sibling* of `OllamaConnectionError`, not a
-  subclass: a timeout usually means the model is slow (retry, or raise the
-  timeout) while a connection error means the server is not there.
+- A refusal is an exception rather than a plausible-looking string (spec §2.6
+  step 5, ADR 0006); the cleaned text stays available on
+  `DescriptionRefusedError.response`.
 - Every wrapped lower-level exception is chained with `raise ... from exc`, so
-  the urllib, socket, JSON or Pillow original is always on `__cause__`.
-- The API cannot report a partial success — there is no "here is a description
-  but it may be wrong" channel. Anything the library doubts, it raises on.
+  the urllib, socket, JSON or Pillow original is on `__cause__` (spec §2.7).
+- There is no channel for a partial success: anything the library will not
+  vouch for, it raises on (spec §1).
+
+## Addendum (2026-08-20)
+
+The unit-1 and unit-2 errata extend the "caller's mistakes keep the standard
+types" rule from `TypeError` to `ValueError`, at construction rather than at
+first use: `max_words < 1`, `timeout <= 0`, `host=""`, a blank `model` and
+`max_image_size <= 0` all raise `ValueError`, as does `prompt=""`; a
+`max_words` or `max_image_size` that is not an `int` (or is a `bool`) raises
+`TypeError`. None of these are `DescribeItError`s.

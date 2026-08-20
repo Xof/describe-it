@@ -3,50 +3,45 @@ id: 0002
 title: Use stdlib urllib as the transport instead of the ollama client library
 date: 2026-08-19
 status: Accepted
-summary: The three JSON POSTs the library makes are written against urllib.request, keeping Pillow the only runtime dependency and letting the tests drive a real HTTP server.
+summary: The library's three JSON POSTs are written against urllib.request, keeping Pillow the only runtime dependency and letting the tests drive a real HTTP server.
 ---
 
 # 0002. Use stdlib urllib as the transport instead of the ollama client library
 
 ## Context
 
-The library needs three endpoints: `POST /api/chat` for a description,
-`POST /api/show` to ask whether a model is present, `POST /api/pull` to fetch
-one. All three are small JSON POSTs to a host the caller configures.
-
-The official `ollama` PyPI client would supply those, but it brings `httpx`
-and `pydantic` with it — a transitive tree far larger than the library it
-would be serving, whose only real dependency is Pillow. The specification (§5)
-weighed that against writing the requests by hand.
+From spec §5: "The library makes three trivial JSON POSTs" — `/api/chat`,
+`/api/show`, `/api/pull` (spec §2.3, §2.5) — to a host the caller configures.
+The question is whether to make them with the official `ollama` PyPI client or
+by hand.
 
 ## Decision
 
-The transport is `urllib.request` from the standard library, in `client.py`,
-which is the only module in the package that opens a socket. The runtime
-dependency list stays `pillow>=10`.
+The transport is `urllib.request` from the standard library (spec §5), in
+`client.py`, the only module in the package that opens a socket. The runtime
+dependency list is `pillow>=10` (spec §5).
 
 ## Alternatives considered
 
-- **The `ollama` PyPI client** — the obvious choice, rejected on dependency
-  weight: httpx and pydantic to send three dictionaries. It would also hide
-  the failure modes the library has to classify (a 404 whose body names a
-  model, a 200 carrying prose, an NDJSON stream that stops early) behind its
-  own exception types, which would have to be mapped anyway.
-- **`requests` or `httpx` directly** — a smaller version of the same trade: a
-  runtime dependency bought with convenience the library barely uses. `urllib`
-  needed roughly one extra screen of code, most of it error classification
-  that would have been written either way.
+- **The `ollama` PyPI client** — rejected in spec §5 for two stated reasons:
+  "the official client would add `httpx` + `pydantic` as transitive
+  dependencies to a package whose only real dependency is Pillow", and "test
+  fidelity is also better: tests run against a real in-process `http.server`,
+  exercising the actual urllib code path including 404 bodies, malformed JSON,
+  and slow responses."
+- No other transport library was weighed in the specification, and spec §3
+  rules out non-Ollama backends entirely.
 
 ## Consequences
 
-- The tests run against a real in-process `http.server` rather than a patched
-  `urlopen`, so 404 bodies, streamed NDJSON, replies cut short of their
-  declared `Content-Length` and socket timeouts are real rather than taught to
-  a mock. This is the fidelity argument that made the choice comfortable.
-- urllib's defaults had to be opted out of explicitly — proxies and redirects
-  (ADR 0008) — which a higher-level client might have handled differently and
-  invisibly.
-- No async support without adding one: an async API is a stated non-goal for
-  v0.1, and would be `asyncio.to_thread` over this code rather than a rewrite.
-- Streaming responses are available (`pull` reads NDJSON line by line) but
-  chat is requested with `stream: false`, since a caption arrives in one piece.
+- The tests drive a real in-process `http.server` rather than a patched
+  `urlopen` (spec §5, §6.1), which is what makes 404 bodies, streamed NDJSON,
+  short reads and socket timeouts real rather than taught to a mock.
+- urllib's defaults had to be opted out of explicitly: the unit-2 errata
+  (2026-08-20) and commit `24e3be2` record proxies being ignored and redirects
+  not followed (ADR 0008).
+- An async API is a stated non-goal for v0.1 (spec §3), which notes it would be
+  "trivial to add later as `adescribe` over `asyncio.to_thread`; not worth an
+  `httpx` dependency now."
+- Chat is requested with `stream: false` (spec §2.5); `pull` reads Ollama's
+  NDJSON stream line by line (spec §6.1).

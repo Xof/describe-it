@@ -3,54 +3,50 @@ id: 0001
 title: Use a local Ollama vision model rather than a hosted description API
 date: 2026-08-19
 status: Accepted
-summary: Descriptions come from a vision model served by a local Ollama, because the workload is high-volume and includes images hosted services refuse.
+summary: Descriptions come from a vision model served by Ollama, because the workload is high-volume and includes images commercial services refuse.
 ---
 
 # 0001. Use a local Ollama vision model rather than a hosted description API
 
 ## Context
 
-The library exists to turn images into alt text at volume. Two facts about
-that workload decide the backend:
+From spec §1, which states the two reasons the library exists:
 
-- Alt-text generation at volume is cheap locally and expensive through a
-  commercial API, where every image is a billed request.
-- The images may be NSFW. Commercial vision services refuse or penalise that
-  content, so a hosted backend would fail on exactly the images the caller
-  most needs described.
-
-A local model has no policy layer beyond whatever is baked into its weights,
-and the machine running the batch is already paid for.
+- "alt-text generation at volume is cheap locally and expensive via commercial
+  APIs";
+- "the images may be NSFW, which commercial services refuse or penalise. A
+  local model has no such policy layer beyond whatever is baked into the
+  weights."
 
 ## Decision
 
-Descriptions come from a vision model served by a local
-[Ollama](https://ollama.com), over its native HTTP API. The library speaks to
-one server, configured by host, and never contacts a third party.
+Descriptions come from a vision model served by [Ollama](https://ollama.com),
+over its native HTTP API (spec §1, §3). The server is named by a `host` option
+that defaults to `http://localhost:11434` (spec §2.2).
 
 ## Alternatives considered
 
-- **A commercial hosted vision API** — loses on both counts above: per-image
-  cost at volume, and a content policy that rejects part of the corpus.
-  Neither is a problem the library could work around.
-- **Ollama's OpenAI-compatible endpoint** — would allow a hosted service as a
-  drop-in later, but it is a lossy translation of Ollama's own API (no
-  `keep_alive`, no `think`) and adds a second shape of request to support for
-  a backend that has been ruled out anyway. Recorded as a non-goal in the
-  specification (§3).
-- **llama.cpp directly, or a Python inference stack** — would drag a model
-  runtime, GPU handling and model file management into a library whose only
-  dependency is Pillow. Ollama already solves model storage, loading and
-  unloading, and is a service the user's machine can share with other tools.
+- **A commercial hosted vision API** — rejected for the two reasons quoted in
+  Context (spec §1): per-image cost at volume, and a content policy that
+  rejects part of the corpus.
+- **Ollama's OpenAI-compatible endpoint, and llama.cpp directly** — spec §3
+  lists both as non-goals ("Any backend other than Ollama's native HTTP API
+  (no OpenAI-compatible endpoint, no llama.cpp direct)") without giving
+  reasons.
+
+  > Rationale not recovered from project sources.
 
 ## Consequences
 
-- The caller must install and run Ollama and pull a vision model. There is no
-  zero-install path, and the README has to say so first.
-- Description quality is bounded by whatever small model fits on the caller's
-  machine. Output is not deterministic enough to assert on beyond structure,
-  which is why the live tests are opt-in and non-blocking (ADR 0010).
-- The whole library is three JSON POSTs to localhost, which is what makes the
-  stdlib transport in ADR 0002 sufficient.
-- Nothing leaves the machine, so an image the caller cannot legally or safely
-  upload is still describable.
+- The caller must run Ollama and have the model present: describe-it never
+  pulls one implicitly (spec §2.3, ADR 0009), so the first call on a fresh
+  machine raises `ModelNotFoundError` naming the `ollama pull` command.
+- Description quality is bounded by the local model, and its output is not
+  stable enough to assert on beyond structure — spec §6.2 requires
+  "structural assertions only — no keyword matching, because small models are
+  not reliable enough to gate on" (ADR 0010).
+- The library's whole job is three JSON POSTs (spec §5), which is what makes
+  the stdlib transport in ADR 0002 sufficient.
+- "Local" is the default, not a guarantee: `host` accepts any HTTP or HTTPS
+  URL, and the unit-2 errata (2026-08-20) records that a remote Ollama behind
+  a reverse proxy is a supported deployment.

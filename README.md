@@ -33,16 +33,29 @@ the standard library.
 
 ## Install
 
-Not published to PyPI yet, so install it from a checkout:
+Not published to PyPI, and the repository is private, so there is no public
+`pip install describe-it` yet.
+
+To work on it, clone and sync. `uv sync` creates the project's own virtual
+environment in `.venv/` and installs describe-it into it, so run things through
+`uv run` rather than expecting the package on your system Python:
 
 ```console
-$ git clone https://github.com/Xof/describe-it
+$ git clone git@github.com:Xof/describe-it.git
 $ cd describe-it
 $ uv sync
+$ uv run describe-it --help
 ```
 
-Once it is published, `uv add describe-it` or `pip install describe-it` will be
-the whole story.
+To use it from another project, install it straight from the repository (which
+needs access to it):
+
+```console
+$ uv add git+ssh://git@github.com/Xof/describe-it
+$ pip install git+ssh://git@github.com/Xof/describe-it
+```
+
+Once it is published, `uv add describe-it` will be the whole story.
 
 ## Usage
 
@@ -95,7 +108,7 @@ constructor.
 |---|---|---|
 | `model` | `$DESCRIBE_IT_MODEL`, else `"qwen3.5:4b"` | Ollama model tag. Must be vision-capable. Blank is a `ValueError`. |
 | `host` | `$OLLAMA_HOST`, else `"http://localhost:11434"` | Base URL, or a bare `host:port` as Ollama's own CLI accepts. A scheme-less host gets `http://` and, if it names no port, 11434; a host written with a scheme is used as written. Credentials, a query string or a fragment are a `ValueError`. |
-| `timeout` | `120.0` | Per-read socket timeout in seconds. Generous because a cold model load can take tens of seconds. Must be positive and finite. |
+| `timeout` | `120.0` | Socket timeout in seconds, applied when connecting and to each read. Generous because a cold model load can take tens of seconds. Must be positive and finite. |
 | `context` | `None` | Free text about where the image appears ("product photo on a shoe listing"). Good alt text depends on context; this reaches the model verbatim. |
 | `language` | `"English"` | Output language, as a plain English name the model will understand. |
 | `max_words` | `30` | Requested upper bound on length. Asked of the model in the prompt, never enforced by truncation — the library will not cut a sentence in half. |
@@ -115,7 +128,7 @@ DescribeItError
 ├── ImageError                  the image cannot be prepared (zero size, unloadable)
 ├── OllamaError                 anything involving the server
 │   ├── OllamaConnectionError   cannot connect (refused, DNS, unreachable)
-│   ├── OllamaTimeoutError      a read exceeded the timeout (a sibling, not a subclass)
+│   ├── OllamaTimeoutError      connecting or reading exceeded the timeout (a sibling, not a subclass)
 │   ├── ModelNotFoundError      the server does not have the model; names the pull command
 │   └── OllamaResponseError     any other non-2xx, or an unusable body; has .status_code and .body
 └── DescriptionError            the server answered but produced no usable description
@@ -157,15 +170,19 @@ diagram.png	A flow chart with three boxes joined by arrows.
 ### Choosing a model
 
 Any vision-capable Ollama model works; the tag is passed straight through. The
-default is `qwen3.5:4b` (~3 GB), chosen because the Qwen line refuses far less
-often than the alternatives, which matters when the images are the sort a
-hosted service would reject.
+default is `qwen3.5:4b` (~3 GB), chosen because Qwen models are generally less
+refusal-prone than the Gemma line — which matters when the images are the sort
+a hosted service would reject. No measurement backs that up; it is the
+judgement recorded when the default was chosen.
 
-- `qwen3.5:2b` — the smaller model in the same family, for a constrained
-  machine. Not benchmarked here.
-- `gemma4:e4b` — better captions, more likely to refuse.
-- `llava:7b` — older and widely available; in this project's live runs it
-  ignored the `language` option and overran the word budget.
+- `gemma4:e4b` — reportedly better captions, and more likely to refuse. Also
+  unmeasured.
+- `llava:7b` — older and widely available. In this project's live runs it
+  answered in English whatever `language` asked for, and overran `max_words`
+  in two runs out of seven.
+
+If the default is too large for your machine, Ollama's library lists smaller
+vision tags; none of them have been tried here.
 
 A model that declines to describe an image produces `DescriptionRefusedError`
 rather than alt text, so a refusal-prone model turns into exceptions rather
