@@ -77,19 +77,46 @@ class _RecordingWriter(io.StringIO):
         self.events.append("<flush>")
 
 
-class _BrokenPipeWriter(io.TextIOBase):
-    """A stdout stand-in that behaves like a pipe whose reader has gone away."""
+class _BrokenPipeWriter(io.StringIO):
+    """A stream stand-in that behaves like a pipe whose reader has gone away."""
 
-    def __init__(self, fd: int) -> None:
-        # A real descriptor, so that the handler's dup2 has somewhere to point
-        # that is not the test runner's own stdout.
+    def __init__(self, fd: int, *, break_write: bool = True) -> None:
+        super().__init__()
+        # A real descriptor, so the handler's dup2 has somewhere to point that
+        # is not the test runner's own stdout, and so the test can afterwards
+        # ask whether this particular stream was the one redirected.
         self._fd = fd
+        # A pipe with an empty buffer fails at the write; one whose writes were
+        # buffered fails at the flush instead, which is a different code path.
+        self._break_write = break_write
 
     def write(self, text: str) -> int:
+        if self._break_write:
+            raise BrokenPipeError(errno.EPIPE, os.strerror(errno.EPIPE))
+        return len(text)
+
+    def flush(self) -> None:
         raise BrokenPipeError(errno.EPIPE, os.strerror(errno.EPIPE))
 
     def fileno(self) -> int:
         return self._fd
+
+
+def _open_sink(path: Path) -> int:
+    """Open a file and return its descriptor, for a stream stand-in to name."""
+    return os.open(path, os.O_WRONLY | os.O_CREAT)
+
+
+def _was_silenced(fd: int, path: Path) -> bool:
+    """Report whether a descriptor was redirected away from its file.
+
+    Writes a probe through the descriptor and closes it: if the descriptor
+    still refers to `path` the probe lands there, and if it was pointed at
+    /dev/null the file stays empty.
+    """
+    os.write(fd, b"probe")
+    os.close(fd)
+    return path.read_bytes() == b""
 
 
 def test_one_file_prints_the_description_alone(
@@ -389,6 +416,54 @@ def test_a_path_with_control_characters_still_produces_one_line_each(
     assert captured.err.count("\n") == 1
 
 
+@pytest.mark.parametrize(
+    ("raw", "escaped"),
+    [
+        ("\r", r"\r"),
+        ("\x0b", r"\x0b"),
+        ("\x1b", r"\x1b"),
+        ("\x7f", r"\x7f"),
+        ("\x85", r"\x85"),
+    ],
+)
+def test_every_control_character_in_a_path_is_escaped(
+    raw: str,
+    escaped: str,
+    server: FakeOllama,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A bare CR splits a record for a universal-newline reader, and an ESC
+    # carries a terminal escape sequence into whatever prints the output.
+    server.script_json("/api/chat", _reply("A red rectangle."))
+    server.script_json("/api/chat", _reply("A red rectangle."))
+    path = _image_file(tmp_path, f"odd{raw}name.png")
+
+    status = cli.main(["--host", server.url, str(path), str(path)])
+
+    captured = capsys.readouterr()
+    assert status == 0
+    assert f"odd{escaped}name.png" in captured.out
+    assert raw not in captured.out
+    assert captured.out.count("\n") == 2
+
+
+def test_control_characters_from_the_server_are_escaped_too(
+    server: FakeOllama, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The error body is the server's text, not ours, and reaches a terminal.
+    server.script("/api/chat", status=500, body=b"boom\x1b[31mred\x07")
+    path = _image_file(tmp_path)
+
+    status = cli.main(["--host", server.url, str(path)])
+
+    captured = capsys.readouterr()
+    assert status == 1
+    assert "\x1b" not in captured.err
+    assert "\x07" not in captured.err
+    assert r"boom\x1b[31mred\x07" in captured.err
+
+
 def test_each_description_is_flushed_as_it_is_produced(
     server: FakeOllama, tmp_path: Path
 ) -> None:
@@ -420,22 +495,81 @@ def test_each_description_is_flushed_as_it_is_produced(
     ]
 
 
-def test_a_closed_output_pipe_ends_the_run_without_a_traceback(
+def test_a_closed_stdout_pipe_ends_the_run_without_a_traceback(
     server: FakeOllama, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # `describe-it *.png | head` closes the pipe under a run that is still
+    # `describe-it a.png | head -0` closes the pipe under a run that is still
     # writing. Unhandled, that is a traceback plus an "Exception ignored" from
     # the interpreter's own final flush.
     server.script_json("/api/chat", _reply("A red rectangle."))
-    sink = os.open(tmp_path / "sink", os.O_WRONLY | os.O_CREAT)
-    monkeypatch.setattr(sys, "stdout", _BrokenPipeWriter(sink))
+    out_path = tmp_path / "stdout-fd"
+    out_fd = _open_sink(out_path)
+    healthy = _RecordingWriter()
+    monkeypatch.setattr(sys, "stdout", _BrokenPipeWriter(out_fd))
+    monkeypatch.setattr(sys, "stderr", healthy)
 
-    try:
-        status = cli.main(["--host", server.url, str(_image_file(tmp_path))])
-    finally:
-        os.close(sink)
+    status = cli.main(["--host", server.url, str(_image_file(tmp_path))])
 
     assert status == 1
+    assert _was_silenced(out_fd, out_path)
+    # The healthy stream keeps its own descriptor, and is flushed rather than
+    # left owing its buffer to the interpreter's exit.
+    assert healthy.events == ["<flush>"]
+
+
+def test_a_closed_stderr_pipe_leaves_a_healthy_stdout_alone(
+    server: FakeOllama, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `describe-it missing.png a.png 2>&1 >out.txt | head -0`: stderr is the
+    # closed pipe and stdout is a file. Redirecting stdout as well would throw
+    # away the descriptions the file was owed.
+    server.script_json("/api/chat", _reply("A red rectangle."))
+    err_path = tmp_path / "stderr-fd"
+    err_fd = _open_sink(err_path)
+    healthy = _RecordingWriter()
+    monkeypatch.setattr(sys, "stdout", healthy)
+    monkeypatch.setattr(sys, "stderr", _BrokenPipeWriter(err_fd))
+    first_missing = tmp_path / "missing.png"
+    second_missing = tmp_path / "also-missing.png"
+    present = _image_file(tmp_path)
+
+    status = cli.main(
+        [
+            "--host",
+            server.url,
+            str(first_missing),
+            str(second_missing),
+            str(present),
+        ]
+    )
+
+    assert status == 1
+    assert _was_silenced(err_fd, err_path)
+    # The run carried on past both unreportable failures, and stdout still
+    # carries its description, flushed to the file that is still reading.
+    assert f"{present}\tA red rectangle." in healthy.events
+    assert healthy.events[-1] == "<flush>"
+
+
+def test_both_streams_sharing_a_closed_pipe_are_redirected(
+    server: FakeOllama, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `describe-it missing.png a.png 2>&1 | head -0`: one pipe, two
+    # descriptors. Silencing only the stream that raised first leaves the other
+    # to fail in the interpreter's exit flush, where nothing can be done.
+    server.script_json("/api/chat", _reply("A red rectangle."))
+    out_path = tmp_path / "stdout-fd"
+    err_path = tmp_path / "stderr-fd"
+    out_fd, err_fd = _open_sink(out_path), _open_sink(err_path)
+    monkeypatch.setattr(sys, "stdout", _BrokenPipeWriter(out_fd))
+    monkeypatch.setattr(sys, "stderr", _BrokenPipeWriter(err_fd))
+    missing = tmp_path / "missing.png"
+
+    status = cli.main(["--host", server.url, str(missing), str(_image_file(tmp_path))])
+
+    assert status == 1
+    assert _was_silenced(err_fd, err_path)
+    assert _was_silenced(out_fd, out_path)
 
 
 def test_an_image_near_pillows_pixel_limit_is_described_without_a_warning(
@@ -510,7 +644,7 @@ def test_a_count_below_one_is_a_usage_error(
 @pytest.mark.parametrize("option", ["--max-words", "--max-image-size"])
 # " 5 " and "1_0" are accepted by int() and mean 5 and 10; on a command line
 # both are typos, so the parser is stricter than the constructor it feeds.
-@pytest.mark.parametrize("value", ["lots", " 5 ", "1_0", "5.0", ""])
+@pytest.mark.parametrize("value", ["lots", " 5 ", "1_0", "5.0", "", "5\n"])
 def test_a_count_that_is_not_a_plain_number_is_a_usage_error(
     option: str, value: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -534,7 +668,7 @@ def test_a_timeout_that_is_not_positive_and_finite_is_a_usage_error(
     assert "positive, finite" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("value", ["soon", "inf", "nan", " 5 ", "1_0", ""])
+@pytest.mark.parametrize("value", ["soon", "inf", "nan", " 5 ", "1_0", "", "5\n"])
 def test_a_timeout_that_is_not_a_plain_number_is_a_usage_error(
     value: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -600,3 +734,20 @@ def test_at_least_one_file_is_required(capsys: pytest.CaptureFixture[str]) -> No
 
     assert exit_info.value.code == 2
     assert "FILE" in capsys.readouterr().err
+
+
+def test_a_stdout_pipe_that_fails_at_the_flush_is_handled_too(
+    server: FakeOllama, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A run whose every file failed writes nothing to stdout, so the closed
+    # pipe is only discovered by the flush that main does rather than leave to
+    # the interpreter's exit.
+    out_path = tmp_path / "stdout-fd"
+    out_fd = _open_sink(out_path)
+    monkeypatch.setattr(sys, "stdout", _BrokenPipeWriter(out_fd, break_write=False))
+    monkeypatch.setattr(sys, "stderr", _RecordingWriter())
+
+    status = cli.main(["--host", server.url, str(tmp_path / "missing.png")])
+
+    assert status == 1
+    assert _was_silenced(out_fd, out_path)

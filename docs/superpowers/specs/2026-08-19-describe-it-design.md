@@ -510,32 +510,43 @@ and the configured Ollama host answers `/api/version`.
   message ends with the path it was given, the repeat is trimmed, since the
   line already starts with it.
 - §2.8: the one-line-per-file contract needs three defences beyond collapsing
-  whitespace. A backslash, tab or newline in a *path* is escaped (`\\`, `\t`,
-  `\n`) in both the tab-separated column and the diagnostic, because POSIX
-  allows all three in a filename and an unescaped one forges a column or splits
-  a record. Pillow's `DecompressionBombWarning` — over the pixel limit but
+  whitespace. A backslash in a *path* is doubled and every control character —
+  the C0 range, DEL and the C1 range — is escaped (`\t`, `\n`, `\r` by name,
+  the rest as `\xNN`), in both the tab-separated column and the diagnostic. A
+  POSIX filename may hold any byte but `/` and NUL, so a tab forges a column,
+  any of CR, LF and the rest of C0 splits a record for a universal-newline
+  reader, and an ESC carries a terminal escape sequence into whatever prints
+  the output. The same escaping is applied to a failure's text, which can come
+  from a server's error body and is likewise not ours to trust. Pillow's `DecompressionBombWarning` — over the pixel limit but
   under twice it, where the image still decodes — is suppressed rather than
   shown or raised: the image is describable, so the run succeeds, and a Python
   warning would put two more lines on stderr. Each description is flushed as it
   is produced, so a reader on the far end of a pipe is not left in silence for
   the length of a batch.
-- §2.8: a closed output pipe (`describe-it *.png | head`) exits 1 quietly. The
-  `BrokenPipeError` is caught in `main` and `sys.stdout` is redirected to
-  `/dev/null` first, per the recipe in the Python documentation, so that the
-  interpreter's own final flush cannot raise a second time and print
-  "Exception ignored".
+- §2.8: a closed output pipe (`describe-it *.png | head`) exits 1 quietly. Both
+  streams are flushed explicitly before `main` returns, because the
+  interpreter's own flush at exit happens where a `BrokenPipeError` cannot be
+  handled and prints "Exception ignored"; whichever stream broke has its
+  descriptor pointed at `/dev/null`, per the recipe in the Python
+  documentation, and **only** that one — a run with `2>&1 >out.txt` has a
+  healthy stdout that still owes its descriptions to the file. The two streams
+  differ in what a lost reader means: stdout is the product, so losing it ends
+  the run, while stderr is commentary, so losing it silences the diagnostics
+  and the run carries on describing.
 - §6.2: the live tests check `$DESCRIBE_IT_INTEGRATION` *before* probing
   `/api/version`, so collecting the module during a unit run opens no socket.
   The probe uses a proxy-free opener with a 2 s timeout, matching the client's
   posture (unit-2 errata) so that a machine-wide proxy cannot skip the tests on
   a machine where the library works.
-- §6.2: run four times against Ollama 0.32.13 with `llava:7b` (this machine's
-  Ollama cannot load its own `qwen3.5:4b` blob). The first test's
-  ≤ `max_words + 10` assertion failed once in four; the word-budget *ordering*
-  test and the missing-model test passed every time; the French test failed
-  every time — `llava:7b` answers in English whatever the prompt asks. Both
-  failures are model behaviour; the assertions are left at the strength stated
-  above, and the job stays non-blocking.
+- §6.2: run seven times on 2026-08-20 against this machine's Ollama 0.32.13
+  with `llava:7b` (this machine's Ollama cannot load its own `qwen3.5:4b`
+  blob). The missing-model test and the word-budget *ordering* test passed in
+  all seven; the first test's ≤ `max_words + 10` assertion failed in two of the
+  seven, with replies of 56 and 78 words against a budget of 30; the French
+  test failed in all seven — `llava:7b` answered in English every time, with no
+  French function word in any reply. Both failures are model behaviour; the
+  assertions are left at the strength stated above, and the job stays
+  non-blocking.
 - §6.2: the synthetic image's text is drawn with `ImageFont.load_default(size=)`,
   which needs Pillow ≥ 10.1, while the library's own floor stays at the `>=10`
   of §5 — the smaller font Pillow 10.0 would give is illegible to a vision

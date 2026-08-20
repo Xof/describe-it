@@ -8,9 +8,10 @@ tests can drive a whole run and read exactly what it wrote.
 
 The output contract is one line per file, on stdout for a description and on
 stderr for a failure, so that a run can be piped into anything that reads
-lines. Three things defend it: whitespace in a diagnostic is collapsed, control
-characters in a path are escaped, and Pillow's decompression-bomb *warning* is
-suppressed (its error is still reported, as a normal failure line).
+lines. Three things defend it: whitespace in a diagnostic is collapsed, every
+control character in a path or a server's message is escaped, and Pillow's
+decompression-bomb *warning* is suppressed (its error is still reported, as a
+normal failure line).
 
 Option values are validated by argparse `type` functions rather than left to
 `Describer`, because a typo in a flag deserves a usage message and exit status
@@ -47,8 +48,17 @@ _DEFAULT_MAX_IMAGE_SIZE = 1024
 # `int()` accepts surrounding whitespace and digit separators, so " 5 " and
 # "1_0" would silently become 5 and 10. On a command line both are typos, never
 # intentions, and the same goes for float()'s "inf" and "nan" spellings.
-_INTEGER_RE = re.compile(r"^[+-]?[0-9]+$")
-_DECIMAL_RE = re.compile(r"^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$")
+_INTEGER_RE = re.compile(r"[+-]?[0-9]+")
+_DECIMAL_RE = re.compile(r"[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?")
+
+# Everything a terminal or a line-oriented reader would rather not meet in the
+# middle of a record: the C0 controls (which include the three line endings a
+# universal-newline reader splits on, and ESC, which starts a terminal escape
+# sequence), DEL, and the C1 range.
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+# The three with a conventional spelling; everything else becomes \xNN.
+_NAMED_ESCAPES = {"\t": r"\t", "\n": r"\n", "\r": r"\r"}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -90,22 +100,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(str(exc))
 
     try:
-        return describe_files(
+        status = describe_files(
             describer,
             args.files,
             context=args.context,
             stdout=sys.stdout,
             stderr=sys.stderr,
         )
-    except BrokenPipeError:
+        # Flushed here, not left to the interpreter's flush on the way out:
+        # there, a broken pipe is unhandleable and prints "Exception ignored".
+        # stdout's failure is the run's failure; stderr's is not, so it is only
+        # tidied away.
+        _flush(sys.stdout)
+        _quiet_flush(sys.stderr)
+        return status
+    except _PipeGoneError as gone:
         # `describe-it *.png | head` closes the pipe while the run is still
-        # writing. The interpreter flushes stdout once more on the way out,
-        # which would raise a second time and print "Exception ignored"; giving
-        # the descriptor /dev/null to flush into is the recipe from the Python
-        # documentation for exactly this.
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, sys.stdout.fileno())
-        os.close(devnull)
+        # writing. Pointing the descriptor at /dev/null gives the interpreter's
+        # own final flush somewhere harmless to go — the recipe from the Python
+        # documentation. Only the stream that actually broke is redirected: a
+        # run with `2>&1 >out.txt` has a healthy stdout that still owes its
+        # buffer to the file.
+        _silence(gone.stream)
+        # Under `2>&1` both streams share the one pipe, so stderr is just as
+        # gone, and its exit flush would fail where nothing can be done.
+        _quiet_flush(sys.stderr)
         return 1
 
 
@@ -134,7 +153,7 @@ def describe_files(
         0 if every file was described, 1 if any of them failed.
 
     Raises:
-        BrokenPipeError: If the reader of stdout has gone away. Left to the
+        _PipeGoneError: If the reader of either stream has gone away. Left to the
             caller, which has the process-level remedy.
     """
     # The path prefix is what makes a multi-file run parseable. A single file
@@ -142,21 +161,108 @@ def describe_files(
     # wants the description alone — pipeable into anything.
     show_path = len(paths) > 1
     failed = False
+    # Diagnostics are commentary, so losing their reader is not a reason to
+    # stop producing descriptions that still have one: a run with
+    # `2>&1 >out.txt | head` keeps filling out.txt. Losing stdout's reader is
+    # different, and ends the run — see `_write`.
+    stderr_gone = False
     for path in paths:
         try:
             description = describe_file(describer, path, context=context)
         except (OSError, Image.DecompressionBombError, DescribeItError) as exc:
             failed = True
-            print(f"describe-it: {_escape(path)}: {_reason(exc, path)}", file=stderr)
+            if not stderr_gone:
+                try:
+                    _write(
+                        stderr, f"describe-it: {_escape(path)}: {_reason(exc, path)}"
+                    )
+                except _PipeGoneError:
+                    _silence(stderr)
+                    stderr_gone = True
             continue
-        line = f"{_escape(path)}\t{description}" if show_path else description
-        # Flushed per line so that a reader on the other end of a pipe sees
-        # each description as it is produced rather than when the run ends —
-        # a batch of a thousand images is minutes of silence otherwise. It also
-        # keeps stdout and stderr in the order they were written, since stderr
-        # is unbuffered and a redirected stdout is not.
-        print(line, file=stdout, flush=True)
+        _write(stdout, f"{_escape(path)}\t{description}" if show_path else description)
     return 1 if failed else 0
+
+
+def _write(stream: TextIO, line: str) -> None:
+    """Write one line to one stream, and say which stream if the reader is gone.
+
+    Args:
+        stream: Where to write.
+        line: The line, without its terminator.
+
+    Raises:
+        _PipeGoneError: If the reader has closed the pipe. Which stream broke is
+            part of the diagnosis, and `BrokenPipeError` does not carry it.
+    """
+    try:
+        # Flushed per line so a reader on the far end of a pipe sees each
+        # description as it is produced rather than when the run ends — a batch
+        # of a thousand images is minutes of silence otherwise. It also keeps
+        # stdout and stderr in the order they were written.
+        print(line, file=stream, flush=True)
+    except BrokenPipeError as exc:
+        raise _PipeGoneError(stream) from exc
+
+
+def _flush(stream: TextIO) -> None:
+    """Flush one stream, and say which stream if the reader is gone.
+
+    Args:
+        stream: The stream to flush.
+
+    Raises:
+        _PipeGoneError: If the reader has closed the pipe.
+    """
+    try:
+        stream.flush()
+    except BrokenPipeError as exc:
+        raise _PipeGoneError(stream) from exc
+
+
+def _quiet_flush(stream: TextIO) -> None:
+    """Flush one stream, redirecting it instead of failing if its reader is gone.
+
+    Args:
+        stream: The stream to flush. Used for stderr, whose reader going away
+            costs the run nothing but a place to put its commentary.
+    """
+    try:
+        stream.flush()
+    except BrokenPipeError:
+        _silence(stream)
+
+
+def _silence(stream: TextIO) -> None:
+    """Point one stream's file descriptor at /dev/null.
+
+    Args:
+        stream: The stream whose reader has gone away. Its descriptor is
+            replaced, so that anything still owed to it — including the
+            interpreter's own flush at exit — is written somewhere that cannot
+            fail.
+    """
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, stream.fileno())
+    os.close(devnull)
+
+
+class _PipeGoneError(Exception):
+    """Internal: the reader of one of this run's output streams has gone away.
+
+    Attributes:
+        stream: The stream whose write or flush failed, so that only that one
+            is redirected.
+    """
+
+    def __init__(self, stream: TextIO) -> None:
+        """Record which stream was lost.
+
+        Args:
+            stream: The stream whose reader closed the pipe.
+        """
+        super().__init__("the reader of an output stream has gone away")
+        self.stream = stream
 
 
 def describe_file(describer: Describer, path: Path, *, context: str | None) -> str:
@@ -199,12 +305,30 @@ def _escape(path: Path) -> str:
         path: The path as the caller wrote it.
 
     Returns:
-        The path with backslashes, tabs and newlines escaped. A filename may
-        legally contain both a tab and a newline on POSIX, either of which
-        would otherwise split one record into two or forge a column.
+        The path with backslashes and every control character escaped.
+
+    A POSIX filename may hold any byte but `/` and NUL, so a tab can forge a
+    column, any of CR, LF and the rest of the C0 range can split one record in
+    two for a universal-newline reader, and an ESC can carry a terminal escape
+    sequence into whatever prints the output.
     """
     # Backslash first, or the escapes introduced below would be escaped again.
-    return str(path).replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
+    return _escape_controls(str(path).replace("\\", "\\\\"))
+
+
+def _escape_controls(text: str) -> str:
+    """Replace every control character in `text` with a printable escape.
+
+    Args:
+        text: The text to make safe for one line of output.
+
+    Returns:
+        The text with C0, DEL and C1 characters spelled out.
+    """
+    return _CONTROL_RE.sub(
+        lambda match: _NAMED_ESCAPES.get(match.group(), f"\\x{ord(match.group()):02x}"),
+        text,
+    )
 
 
 def _reason(exc: Exception, path: Path) -> str:
@@ -228,7 +352,10 @@ def _reason(exc: Exception, path: Path) -> str:
     repeated = f" {str(path)!r}"
     if detail.endswith(repeated):
         detail = detail[: -len(repeated)]
-    return " ".join(detail.split())
+    # Collapsing whitespace deals with the newlines and tabs; the escape pass
+    # deals with the rest, because this text can come from a server's error
+    # body and ESC is not whitespace.
+    return _escape_controls(" ".join(detail.split()))
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -372,7 +499,7 @@ def _positive_int(text: str) -> int:
         argparse.ArgumentTypeError: If it is not a plain whole number, or is
             below 1.
     """
-    if not _INTEGER_RE.match(text):
+    if not _INTEGER_RE.fullmatch(text):
         raise argparse.ArgumentTypeError(f"{text!r} is not a whole number")
     value = int(text)
     if value < 1:
@@ -395,7 +522,7 @@ def _seconds(text: str) -> float:
             hang with extra steps, and the spellings of infinity and nan are
             rejected outright as numbers of seconds.
     """
-    if not _DECIMAL_RE.match(text):
+    if not _DECIMAL_RE.fullmatch(text):
         raise argparse.ArgumentTypeError(f"{text!r} is not a number of seconds")
     value = float(text)
     if not math.isfinite(value) or value <= 0:
