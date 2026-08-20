@@ -751,3 +751,59 @@ def test_a_stdout_pipe_that_fails_at_the_flush_is_handled_too(
 
     assert status == 1
     assert _was_silenced(out_fd, out_path)
+
+
+def test_a_run_with_no_stdout_at_all_exits_quietly(
+    server: FakeOllama, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `describe-it a.png >&-` starts the process with no usable stdout, which
+    # Python reports as sys.stdout being None. There is nowhere to deliver a
+    # description, so the run says so with its status and nothing else.
+    stderr = _RecordingWriter()
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", stderr)
+
+    status = cli.main(["--host", server.url, str(_image_file(tmp_path))])
+
+    assert status == 1
+    # No work was done and nothing was said about it.
+    assert server.requests == []
+    assert stderr.events == ["<flush>"]
+
+
+def test_diagnostics_are_dropped_rather_than_sent_to_stdout(
+    server: FakeOllama, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `describe-it missing.png a.png 2>&-` leaves sys.stderr as None, and
+    # `print(file=None)` would fall back to stdout — putting a diagnostic in
+    # among the descriptions, where a consumer would read it as one.
+    server.script_json("/api/chat", _reply("A red rectangle."))
+    stdout = _RecordingWriter()
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", None)
+    missing = tmp_path / "missing.png"
+    present = _image_file(tmp_path)
+
+    status = cli.main(["--host", server.url, str(missing), str(present)])
+
+    assert status == 1
+    written = "".join(stdout.events)
+    assert f"{present}\tA red rectangle." in written
+    assert "describe-it:" not in written
+    assert str(missing) not in written
+
+
+def test_control_characters_in_a_description_are_escaped(
+    server: FakeOllama, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The description is the model's text, and the server is not ours to trust:
+    # an ESC would carry a colour sequence into whatever prints the output.
+    server.script_json("/api/chat", _reply("A \x1b[31mred\x1b[0m circle\x07."))
+
+    status = cli.main(["--host", server.url, str(_image_file(tmp_path))])
+
+    captured = capsys.readouterr()
+    assert status == 0
+    assert "\x1b" not in captured.out
+    assert "\x07" not in captured.out
+    assert captured.out == r"A \x1b[31mred\x1b[0m circle\x07." + "\n"

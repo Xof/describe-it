@@ -9,9 +9,14 @@ tests can drive a whole run and read exactly what it wrote.
 The output contract is one line per file, on stdout for a description and on
 stderr for a failure, so that a run can be piped into anything that reads
 lines. Three things defend it: whitespace in a diagnostic is collapsed, every
-control character in a path or a server's message is escaped, and Pillow's
-decompression-bomb *warning* is suppressed (its error is still reported, as a
-normal failure line).
+control character in a description, a path or an error message is escaped, and
+Pillow's decompression-bomb *warning* is suppressed (its error is still
+reported, as a normal failure line).
+
+A stream can also be missing outright — `describe-it a.png >&-` leaves
+`sys.stdout` as `None` — which is treated as absent rather than as an error:
+descriptions have nowhere to go, so the run exits 1 without doing the work,
+and diagnostics with nowhere to go are dropped.
 
 Option values are validated by argparse `type` functions rather than left to
 `Describer`, because a typo in a flag deserves a usage message and exit status
@@ -133,8 +138,8 @@ def describe_files(
     paths: Sequence[Path],
     *,
     context: str | None,
-    stdout: TextIO,
-    stderr: TextIO,
+    stdout: TextIO | None,
+    stderr: TextIO | None,
 ) -> int:
     """Describe every file, reporting failures without abandoning the rest.
 
@@ -146,16 +151,23 @@ def describe_files(
         describer: The configured describer, shared by every file in the run.
         paths: The image files, in the order the caller gave them.
         context: Where the images appear, passed to the model verbatim.
-        stdout: Where descriptions are written.
-        stderr: Where failures are reported.
+        stdout: Where descriptions are written. `None` when the process was
+            started without a usable stdout (`describe-it a.png >&-`), which
+            Python reports by setting `sys.stdout` to `None`.
+        stderr: Where failures are reported, or `None` as for `stdout`.
 
     Returns:
-        0 if every file was described, 1 if any of them failed.
+        0 if every file was described, 1 if any of them failed, and 1 without
+        describing anything if there is no stdout to deliver descriptions to.
 
     Raises:
         _PipeGoneError: If the reader of either stream has gone away. Left to the
             caller, which has the process-level remedy.
     """
+    if stdout is None:
+        # No stdout, no product. Reporting that on stderr would be shouting
+        # about a stream nobody asked for, so the status carries it alone.
+        return 1
     # The path prefix is what makes a multi-file run parseable. A single file
     # is the interactive case, where the caller knows what they asked about and
     # wants the description alone — pipeable into anything.
@@ -176,25 +188,35 @@ def describe_files(
                     _write(
                         stderr, f"describe-it: {_escape(path)}: {_reason(exc, path)}"
                     )
-                except _PipeGoneError:
-                    _silence(stderr)
+                except _PipeGoneError as gone:
+                    # gone.stream is the stream that actually raised, which is
+                    # stderr here by construction and typed as present.
+                    _silence(gone.stream)
                     stderr_gone = True
             continue
-        _write(stdout, f"{_escape(path)}\t{description}" if show_path else description)
+        # The description is the model's text, not ours: it reaches a terminal
+        # and may carry anything the server put in it.
+        text = _escape_controls(description)
+        _write(stdout, f"{_escape(path)}\t{text}" if show_path else text)
     return 1 if failed else 0
 
 
-def _write(stream: TextIO, line: str) -> None:
+def _write(stream: TextIO | None, line: str) -> None:
     """Write one line to one stream, and say which stream if the reader is gone.
 
     Args:
-        stream: Where to write.
+        stream: Where to write, or `None` if the process has no such stream, in
+            which case the line is dropped. The stream is always named
+            explicitly: `print(file=None)` would fall back to `sys.stdout` and
+            put diagnostics in with the descriptions.
         line: The line, without its terminator.
 
     Raises:
         _PipeGoneError: If the reader has closed the pipe. Which stream broke is
             part of the diagnosis, and `BrokenPipeError` does not carry it.
     """
+    if stream is None:
+        return
     try:
         # Flushed per line so a reader on the far end of a pipe sees each
         # description as it is produced rather than when the run ends — a batch
@@ -205,28 +227,34 @@ def _write(stream: TextIO, line: str) -> None:
         raise _PipeGoneError(stream) from exc
 
 
-def _flush(stream: TextIO) -> None:
+def _flush(stream: TextIO | None) -> None:
     """Flush one stream, and say which stream if the reader is gone.
 
     Args:
-        stream: The stream to flush.
+        stream: The stream to flush, or `None` if the process has no such
+            stream, which leaves nothing to flush.
 
     Raises:
         _PipeGoneError: If the reader has closed the pipe.
     """
+    if stream is None:
+        return
     try:
         stream.flush()
     except BrokenPipeError as exc:
         raise _PipeGoneError(stream) from exc
 
 
-def _quiet_flush(stream: TextIO) -> None:
+def _quiet_flush(stream: TextIO | None) -> None:
     """Flush one stream, redirecting it instead of failing if its reader is gone.
 
     Args:
-        stream: The stream to flush. Used for stderr, whose reader going away
-            costs the run nothing but a place to put its commentary.
+        stream: The stream to flush, or `None` if the process has no such
+            stream. Used for stderr, whose reader going away costs the run
+            nothing but a place to put its commentary.
     """
+    if stream is None:
+        return
     try:
         stream.flush()
     except BrokenPipeError:

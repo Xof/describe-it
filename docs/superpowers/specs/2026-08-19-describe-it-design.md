@@ -510,19 +510,30 @@ and the configured Ollama host answers `/api/version`.
   message ends with the path it was given, the repeat is trimmed, since the
   line already starts with it.
 - §2.8: the one-line-per-file contract needs three defences beyond collapsing
-  whitespace. A backslash in a *path* is doubled and every control character —
-  the C0 range, DEL and the C1 range — is escaped (`\t`, `\n`, `\r` by name,
-  the rest as `\xNN`), in both the tab-separated column and the diagnostic. A
-  POSIX filename may hold any byte but `/` and NUL, so a tab forges a column,
-  any of CR, LF and the rest of C0 splits a record for a universal-newline
-  reader, and an ESC carries a terminal escape sequence into whatever prints
-  the output. The same escaping is applied to a failure's text, which can come
-  from a server's error body and is likewise not ours to trust. Pillow's `DecompressionBombWarning` — over the pixel limit but
-  under twice it, where the image still decodes — is suppressed rather than
-  shown or raised: the image is describable, so the run succeeds, and a Python
-  warning would put two more lines on stderr. Each description is flushed as it
-  is produced, so a reader on the far end of a pipe is not left in silence for
+  whitespace. Every control character — the C0 range, DEL and the C1 range — is
+  escaped (`\t`, `\n`, `\r` by name, the rest as `\xNN`) in all three of the
+  things a line is made of: the description, the path, and a failure's text. A
+  backslash in a path is doubled as well, so the escaping stays reversible.
+  None of the three is ours to trust — a POSIX filename may hold any byte but
+  `/` and NUL, and the description and the error body are the server's text —
+  and each character costs something different: a tab forges a column, CR and
+  LF split a record for a reader using universal newlines (the rest of C0,
+  along with `\x1c`–`\x1e` and `\x85`, split one for `str.splitlines()` and
+  for a terminal), and an ESC carries a terminal escape sequence into whatever
+  prints the output. `clean_response` is left alone: this is presentation, and
+  a library caller gets the model's text as it came.
+  Pillow's `DecompressionBombWarning` — over the pixel limit but under twice
+  it, where the image still decodes — is suppressed rather than shown or
+  raised: the image is describable, so the run succeeds, and a Python warning
+  would put two more lines on stderr. Each description is flushed as it is
+  produced, so a reader on the far end of a pipe is not left in silence for
   the length of a batch.
+- §2.8: a stream that is missing outright — `describe-it a.png >&-` leaves
+  `sys.stdout` as `None` — is absent rather than broken. With no stdout there
+  is nowhere to deliver a description, so the run exits 1 without doing the
+  work; with no stderr the diagnostics are dropped. Every write names its
+  stream explicitly for the same reason: `print(file=None)` falls back to
+  `sys.stdout`, which would file the diagnostics in among the descriptions.
 - §2.8: a closed output pipe (`describe-it *.png | head`) exits 1 quietly. Both
   streams are flushed explicitly before `main` returns, because the
   interpreter's own flush at exit happens where a `BrokenPipeError` cannot be
