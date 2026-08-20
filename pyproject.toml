@@ -12,6 +12,28 @@ requires-python = ">=3.12"
 # Pillow is the only runtime dependency: the Ollama transport is plain
 # urllib.request from the standard library.
 dependencies = ["pillow>=10"]
+keywords = [
+    "accessibility",
+    "alt-text",
+    "captioning",
+    "image",
+    "ollama",
+    "pillow",
+    "vision",
+]
+# No "License ::" classifier: the project declares no license yet, and a
+# classifier is not the place to invent one.
+classifiers = [
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Multimedia :: Graphics",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Repository = "https://github.com/Xof/describe-it"
 
 [project.scripts]
 describe-it = "describe_it.cli:main"

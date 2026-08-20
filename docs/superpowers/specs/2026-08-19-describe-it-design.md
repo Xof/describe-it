@@ -480,3 +480,90 @@ and the configured Ollama host answers `/api/version`.
   along with `host`. `model` must not be blank after stripping (`ValueError`),
   a blank `$DESCRIBE_IT_MODEL` counts as unset exactly as a blank `$OLLAMA_HOST`
   does, and `max_words` must be an `int` and not a `bool` (`TypeError`).
+
+### Errata (2026-08-20, found during unit 3)
+
+- §2.8: every option value that the library can reject is validated by an
+  argparse `type` function, so a bad one is a usage message and exit status 2
+  rather than a traceback out of `Describer` — `--max-words` and
+  `--max-image-size` must be integers of at least 1, `--timeout` a positive
+  finite number, `--model` non-blank, and `--host` something `normalise_host`
+  accepts. (`--language` and `--context` are free text, which the library does
+  not constrain either.) `--model` and `--host` default to `None` and are
+  passed through as `None`, so `$DESCRIBE_IT_MODEL` and `$OLLAMA_HOST` mean the
+  same thing on the command line as in the library — and because those two
+  reach `Describer` without passing through a `type` function, `main` turns the
+  `ValueError` they can raise into the same usage error, exit 2 as well.
+- §2.8: `--max-image-size` takes a pixel count only; the library's `None`
+  ("send at full size") is not expressible on the command line. `keep_alive`
+  and `prompt` have no flags either — one describer is built per run, and both
+  are programmatic choices.
+- §2.8: a failure is reported as `describe-it: <path>: <reason>` on one line,
+  with internal whitespace collapsed, because a server's error body can carry
+  newlines and a multi-file run is read a line at a time. An `OSError` is
+  reported by its `strerror` where it has one (the filename is already in the
+  message); Pillow's `UnidentifiedImageError` has none and is reported whole.
+  `--version` prints `describe-it <version>`. Pillow's
+  `DecompressionBombError` is reported the same way even though it is not an
+  `OSError`: it is raised by `Image.open`, before `prepare_image` could wrap
+  it, and it is a file the CLI cannot read like any other. Where Pillow's
+  message ends with the path it was given, the repeat is trimmed, since the
+  line already starts with it.
+- §2.8: the one-line-per-file contract needs three defences beyond collapsing
+  whitespace. Every control character — the C0 range, DEL and the C1 range — is
+  escaped (`\t`, `\n`, `\r` by name, the rest as `\xNN`) in all three of the
+  things a line is made of: the description, the path, and a failure's text. A
+  backslash in a path is doubled as well, so the escaping stays reversible.
+  None of the three is ours to trust — a POSIX filename may hold any byte but
+  `/` and NUL, and the description and the error body are the server's text —
+  and each character costs something different: a tab forges a column, CR and
+  LF split a record for a reader using universal newlines (the rest of C0,
+  along with `\x1c`–`\x1e` and `\x85`, split one for `str.splitlines()` and
+  for a terminal), and an ESC carries a terminal escape sequence into whatever
+  prints the output. `clean_response` is left alone: this is presentation, and
+  a library caller gets the model's text as it came.
+  Pillow's `DecompressionBombWarning` — over the pixel limit but under twice
+  it, where the image still decodes — is suppressed rather than shown or
+  raised: the image is describable, so the run succeeds, and a Python warning
+  would put two more lines on stderr. Each description is flushed as it is
+  produced, so a reader on the far end of a pipe is not left in silence for
+  the length of a batch.
+- §2.8: a stream that is missing outright — `describe-it a.png >&-` leaves
+  `sys.stdout` as `None` — is absent rather than broken. With no stdout there
+  is nowhere to deliver a description, so the run exits 1 without doing the
+  work; with no stderr the diagnostics are dropped. Every write names its
+  stream explicitly for the same reason: `print(file=None)` falls back to
+  `sys.stdout`, which would file the diagnostics in among the descriptions.
+- §2.8: a closed output pipe (`describe-it *.png | head`) exits 1 quietly. Both
+  streams are flushed explicitly before `main` returns, because the
+  interpreter's own flush at exit happens where a `BrokenPipeError` cannot be
+  handled and prints "Exception ignored"; whichever stream broke has its
+  descriptor pointed at `/dev/null`, per the recipe in the Python
+  documentation, and **only** that one — a run with `2>&1 >out.txt` has a
+  healthy stdout that still owes its descriptions to the file. The two streams
+  differ in what a lost reader means: stdout is the product, so losing it ends
+  the run, while stderr is commentary, so losing it silences the diagnostics
+  and the run carries on describing.
+- §6.2: the live tests check `$DESCRIBE_IT_INTEGRATION` *before* probing
+  `/api/version`, so collecting the module during a unit run opens no socket.
+  The probe uses a proxy-free opener with a 2 s timeout, matching the client's
+  posture (unit-2 errata) so that a machine-wide proxy cannot skip the tests on
+  a machine where the library works.
+- §6.2: run seven times on 2026-08-20 against this machine's Ollama 0.32.13
+  with `llava:7b` (this machine's Ollama cannot load its own `qwen3.5:4b`
+  blob). The missing-model test and the word-budget *ordering* test passed in
+  all seven; the first test's ≤ `max_words + 10` assertion failed in two of the
+  seven, with replies of 56 and 78 words against a budget of 30; the French
+  test failed in all seven — `llava:7b` answered in English every time, with no
+  French function word in any reply. Both failures are model behaviour; the
+  assertions are left at the strength stated above, and the job stays
+  non-blocking.
+- §6.2: the synthetic image's text is drawn with `ImageFont.load_default(size=)`,
+  which needs Pillow ≥ 10.1, while the library's own floor stays at the `>=10`
+  of §5 — the smaller font Pillow 10.0 would give is illegible to a vision
+  model at this resolution, and the requirement belongs to the opt-in tests
+  rather than to the package.
+- §5: the distribution carries a `py.typed` marker, a `Repository` URL,
+  keywords and classifiers (Python 3.12–3.14, Multimedia :: Graphics,
+  Intended Audience :: Developers, Typing :: Typed). No license is declared, so
+  none is claimed in the metadata or the README.

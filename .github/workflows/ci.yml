@@ -45,7 +45,8 @@ jobs:
     continue-on-error: true
     timeout-minutes: 30
     env:
-      DESCRIBE_IT_INTEGRATION: "1"
+      # Read by the pull step below and by the tests, which describe whichever
+      # model this names. The opt-in variable is set on the test step itself.
       DESCRIBE_IT_MODEL: qwen3.5:4b
     steps:
       - uses: actions/checkout@v4
@@ -67,4 +68,9 @@ jobs:
           done
           ollama pull "$DESCRIBE_IT_MODEL"
 
-      - run: uv run pytest -m integration
+      # -v so the log names each test: the value of a run against a real model
+      # is as much in what it printed as in whether it passed. -rs because
+      # these tests skip themselves when the server is not answering, and a
+      # silent skip reads exactly like a pass in the log.
+      - name: Run the live tests
+        run: DESCRIBE_IT_INTEGRATION=1 uv run pytest -m integration -v -rs

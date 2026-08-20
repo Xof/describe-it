@@ -56,8 +56,10 @@ def test_the_documented_defaults_are_the_static_fallbacks() -> None:
     assert describe_it.DEFAULT_HOST == "http://localhost:11434"
 
 
-def test_console_script_target_is_importable() -> None:
-    # The entry point declared in pyproject.toml has to resolve from the first
-    # commit; the CLI itself lands in a later work unit.
-    with pytest.raises(NotImplementedError):
-        cli.main()
+def test_console_script_target_resolves_to_the_cli() -> None:
+    # Loading the entry point is what a `describe-it` invocation does, so this
+    # catches a pyproject.toml that names a function the package does not have.
+    (script,) = importlib.metadata.entry_points(
+        group="console_scripts", name="describe-it"
+    )
+    assert script.load() is cli.main
