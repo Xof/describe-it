@@ -17,3 +17,7 @@ htmlcov/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+
+# graphify local pointers (machine-specific; the graph itself is committed)
+graphify-out/.graphify_python
+graphify-out/.graphify_root

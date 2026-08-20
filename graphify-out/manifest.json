@@ -1,0 +1,187 @@
+{
+  "pyproject.toml": {
+    "mtime": 1787222049.973006,
+    "ast_hash": "f3afcd27e7eacddc9cf6c65aad293d2f",
+    "semantic_hash": "f3afcd27e7eacddc9cf6c65aad293d2f"
+  },
+  "src/describe_it/__init__.py": {
+    "mtime": 1787222049.9731166,
+    "ast_hash": "414c3e503a12bef4eb48a6f3aa978f7c",
+    "semantic_hash": "414c3e503a12bef4eb48a6f3aa978f7c"
+  },
+  "src/describe_it/cli.py": {
+    "mtime": 1787222049.9732847,
+    "ast_hash": "86540af9886a75612476d24207776134",
+    "semantic_hash": "86540af9886a75612476d24207776134"
+  },
+  "src/describe_it/client.py": {
+    "mtime": 1787222049.9734259,
+    "ast_hash": "cad4a6aae944804979f5108684bb1ded",
+    "semantic_hash": "cad4a6aae944804979f5108684bb1ded"
+  },
+  "src/describe_it/config.py": {
+    "mtime": 1787222049.973531,
+    "ast_hash": "1d7a466e42a3e90579c6bde446829768",
+    "semantic_hash": "1d7a466e42a3e90579c6bde446829768"
+  },
+  "src/describe_it/describer.py": {
+    "mtime": 1787222049.9736402,
+    "ast_hash": "df3ccee7ff7f1c19f2aacd673034a15d",
+    "semantic_hash": "df3ccee7ff7f1c19f2aacd673034a15d"
+  },
+  "src/describe_it/exceptions.py": {
+    "mtime": 1787222049.9737184,
+    "ast_hash": "86882a7eb64251b544a7e89a83ba7127",
+    "semantic_hash": "86882a7eb64251b544a7e89a83ba7127"
+  },
+  "src/describe_it/image.py": {
+    "mtime": 1787222049.9738498,
+    "ast_hash": "eeeb18937100f806fc5498c2ec12269c",
+    "semantic_hash": "eeeb18937100f806fc5498c2ec12269c"
+  },
+  "src/describe_it/prompt.py": {
+    "mtime": 1787222049.9739656,
+    "ast_hash": "f5838390c074ea822c0872210e078ca7",
+    "semantic_hash": "f5838390c074ea822c0872210e078ca7"
+  },
+  "tests/conftest.py": {
+    "mtime": 1787222049.9741466,
+    "ast_hash": "f156027c51930337ecf11d6b82739c64",
+    "semantic_hash": "f156027c51930337ecf11d6b82739c64"
+  },
+  "tests/integration/test_live.py": {
+    "mtime": 1787222049.97427,
+    "ast_hash": "3bdcdc23aa5bf4398e4536091ae07a5c",
+    "semantic_hash": "3bdcdc23aa5bf4398e4536091ae07a5c"
+  },
+  "tests/test_cli.py": {
+    "mtime": 1787222049.9744394,
+    "ast_hash": "ce2667bed6fcd9b445ae48a0aea53a9b",
+    "semantic_hash": "ce2667bed6fcd9b445ae48a0aea53a9b"
+  },
+  "tests/test_client.py": {
+    "mtime": 1787222049.974578,
+    "ast_hash": "ad636f9a22c3e4933d937119ef885590",
+    "semantic_hash": "ad636f9a22c3e4933d937119ef885590"
+  },
+  "tests/test_describer.py": {
+    "mtime": 1787222049.9747174,
+    "ast_hash": "cb9d4c9570f82751911673f7cbbc8689",
+    "semantic_hash": "cb9d4c9570f82751911673f7cbbc8689"
+  },
+  "tests/test_exceptions.py": {
+    "mtime": 1787222049.9748123,
+    "ast_hash": "9acff949fd9749a69c49e4cd44463ddb",
+    "semantic_hash": "9acff949fd9749a69c49e4cd44463ddb"
+  },
+  "tests/test_image.py": {
+    "mtime": 1787222049.9749322,
+    "ast_hash": "0901dadd5d201fe650c5a4e5e8c9d717",
+    "semantic_hash": "0901dadd5d201fe650c5a4e5e8c9d717"
+  },
+  "tests/test_package.py": {
+    "mtime": 1787222049.9750373,
+    "ast_hash": "726430be87824cd3b843fe33e4612395",
+    "semantic_hash": "726430be87824cd3b843fe33e4612395"
+  },
+  "tests/test_prompt.py": {
+    "mtime": 1787222049.975141,
+    "ast_hash": "1304da36520447b2650110ec84709c39",
+    "semantic_hash": "1304da36520447b2650110ec84709c39"
+  },
+  ".github/workflows/ci.yml": {
+    "mtime": 1787222049.9703698,
+    "ast_hash": "96388b36b5b9cc76da373e657f8b57a2",
+    "semantic_hash": "96388b36b5b9cc76da373e657f8b57a2"
+  },
+  "ARCHITECTURE.md": {
+    "mtime": 1787222049.970621,
+    "ast_hash": "8d01bfff7778ee1f538c8152047e586c",
+    "semantic_hash": "8d01bfff7778ee1f538c8152047e586c"
+  },
+  "README.md": {
+    "mtime": 1787222049.9707727,
+    "ast_hash": "8549544035d4628d554f0dca25684fa9",
+    "semantic_hash": "8549544035d4628d554f0dca25684fa9"
+  },
+  "docs/adr/0001-use-a-local-ollama-vision-model.md": {
+    "mtime": 1787222049.9709346,
+    "ast_hash": "28bb6ac3cd34379434537f112f924104",
+    "semantic_hash": "28bb6ac3cd34379434537f112f924104"
+  },
+  "docs/adr/0002-use-stdlib-urllib-as-the-transport.md": {
+    "mtime": 1787222049.9710624,
+    "ast_hash": "eedacdfdb4353b1228c621e742384d4a",
+    "semantic_hash": "eedacdfdb4353b1228c621e742384d4a"
+  },
+  "docs/adr/0003-image-in-string-out-failures-are-exceptions.md": {
+    "mtime": 1787222049.9711936,
+    "ast_hash": "a7c6e727e506d18bb414caa05dbe61ee",
+    "semantic_hash": "a7c6e727e506d18bb414caa05dbe61ee"
+  },
+  "docs/adr/0004-default-to-qwen35-4b.md": {
+    "mtime": 1787222049.9712913,
+    "ast_hash": "7625c6d9cd7d946aa98a3e0425b8896e",
+    "semantic_hash": "7625c6d9cd7d946aa98a3e0425b8896e"
+  },
+  "docs/adr/0005-prepare-images-as-rgb-jpeg-over-white.md": {
+    "mtime": 1787222049.9714246,
+    "ast_hash": "72d5ebe12a7609ed2ad1b8dd78859123",
+    "semantic_hash": "72d5ebe12a7609ed2ad1b8dd78859123"
+  },
+  "docs/adr/0006-clean-replies-to-a-fixed-point.md": {
+    "mtime": 1787222049.9715316,
+    "ast_hash": "f9c94fea22932a2942a1ec90a1b6054c",
+    "semantic_hash": "f9c94fea22932a2942a1ec90a1b6054c"
+  },
+  "docs/adr/0007-fix-the-sampling-options-for-a-caption.md": {
+    "mtime": 1787222049.9716487,
+    "ast_hash": "fdab5b8c32fd5d73714d3c42c9a088af",
+    "semantic_hash": "fdab5b8c32fd5d73714d3c42c9a088af"
+  },
+  "docs/adr/0008-build-a-private-urllib-opener.md": {
+    "mtime": 1787222049.971766,
+    "ast_hash": "c29b2ffb4e38b6931c5e05ff2f142da1",
+    "semantic_hash": "c29b2ffb4e38b6931c5e05ff2f142da1"
+  },
+  "docs/adr/0009-never-pull-a-model-implicitly.md": {
+    "mtime": 1787222049.9718668,
+    "ast_hash": "a03e41d562f7c648f5526a69a41acf77",
+    "semantic_hash": "a03e41d562f7c648f5526a69a41acf77"
+  },
+  "docs/adr/0010-gate-on-a-hermetic-suite-and-keep-live-tests-opt-in.md": {
+    "mtime": 1787222049.9719763,
+    "ast_hash": "351e9756ca0f1de2e5f47a79c99c2159",
+    "semantic_hash": "351e9756ca0f1de2e5f47a79c99c2159"
+  },
+  "docs/adr/0011-send-think-false-unconditionally.md": {
+    "mtime": 1787222049.9720702,
+    "ast_hash": "e36b0236009bb4728c3a970b7dff9393",
+    "semantic_hash": "e36b0236009bb4728c3a970b7dff9393"
+  },
+  "docs/adr/0012-normalise-a-host-the-way-ollamas-cli-does.md": {
+    "mtime": 1787222049.9721754,
+    "ast_hash": "ad05c158bf27f693e3a07422a9a71887",
+    "semantic_hash": "ad05c158bf27f693e3a07422a9a71887"
+  },
+  "docs/adr/0013-guard-the-refusal-heuristic.md": {
+    "mtime": 1787222049.9722788,
+    "ast_hash": "b7a3fb926776b90f6b17504828cbec6d",
+    "semantic_hash": "b7a3fb926776b90f6b17504828cbec6d"
+  },
+  "docs/adr/0014-validate-configuration-at-construction.md": {
+    "mtime": 1787222049.9723983,
+    "ast_hash": "c653ac9bd28693e165a0b4777cbffd0a",
+    "semantic_hash": "c653ac9bd28693e165a0b4777cbffd0a"
+  },
+  "docs/adr/README.md": {
+    "mtime": 1787222049.9725084,
+    "ast_hash": "ac6004953ea6eaabec6a2c9bc1a8997a",
+    "semantic_hash": "ac6004953ea6eaabec6a2c9bc1a8997a"
+  },
+  "docs/superpowers/specs/2026-08-19-describe-it-design.md": {
+    "mtime": 1787222049.9727972,
+    "ast_hash": "5d9b7af3a365c943554746244b1f0fb0",
+    "semantic_hash": "5d9b7af3a365c943554746244b1f0fb0"
+  }
+}
