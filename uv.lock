@@ -179,7 +179,7 @@ wheels = [
 ]
 
 [[package]]
-name = "describe-it"
+name = "describe-image"
 version = "1.0.0"
 source = { editable = "." }
 dependencies = [

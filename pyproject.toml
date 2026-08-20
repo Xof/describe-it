@@ -1,5 +1,5 @@
 [project]
-name = "describe-it"
+name = "describe-image"
 version = "1.0.0"
 description = "Alt-text descriptions for PIL images via a local Ollama vision model"
 readme = "README.md"
@@ -47,6 +47,12 @@ describe-it = "describe_it.cli:main"
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]
 build-backend = "uv_build"
+
+# uv_build derives the module name from the distribution name by default, and
+# those differ here: the distribution is describe-image (describe-it was taken
+# on PyPI) while the package under src/ stays describe_it.
+[tool.uv.build-backend]
+module-name = "describe_it"
 
 [dependency-groups]
 dev = [

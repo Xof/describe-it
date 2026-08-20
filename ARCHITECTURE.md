@@ -9,6 +9,16 @@ them, and `config` is read by `cli`, `describer` and `client`. `cli` also
 imports the package root (for `__version__`) and PIL (to open a file). Nothing
 is cached and nothing is global.
 
+## Three names
+
+The project answers to three names, and they are deliberately not the same
+string. The PyPI distribution is `describe-image` (because `describe-it` was
+already taken on PyPI by an unrelated 2014 package); the import package is
+`describe_it`; the console script is `describe-it`. Anything that looks the
+version up through `importlib.metadata` — `describe_it/__init__.py`, the CLI
+test for `--version` — must use the distribution name, `describe-image`, not
+the import name. The GitHub repository and the source tree keep `describe-it`.
+
 ## Component map
 
 | Component | Responsibility | Entry points |

@@ -608,7 +608,7 @@ def test_the_version_option_prints_the_package_version(
         cli.main(["--version"])
 
     assert exit_info.value.code == 0
-    version = importlib.metadata.version("describe-it")
+    version = importlib.metadata.version("describe-image")
     # The exact line, not just the number: the program has to name itself, or
     # a version scraped from a pipeline says nothing about what produced it.
     assert capsys.readouterr().out == f"describe-it {version}\n"

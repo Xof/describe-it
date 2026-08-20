@@ -31,7 +31,7 @@ _PUBLIC_NAMES = {
 
 
 def test_version_comes_from_installed_metadata() -> None:
-    assert describe_it.__version__ == importlib.metadata.version("describe-it")
+    assert describe_it.__version__ == importlib.metadata.version("describe-image")
 
 
 @pytest.mark.parametrize("name", describe_it.__all__)

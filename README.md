@@ -32,8 +32,14 @@ the standard library.
 
 ## Install
 
-Not published to PyPI, and the repository is private, so there is no public
-`pip install describe-it` yet.
+The distribution on PyPI is `describe-image` (the name `describe-it` was
+already taken there). The import package is still `describe_it` and the command
+is still `describe-it`:
+
+```console
+$ uv add describe-image
+$ pip install describe-image
+```
 
 To work on it, clone and sync. `uv sync` creates the project's own virtual
 environment in `.venv/` and installs describe-it into it, so run things through
@@ -46,15 +52,12 @@ $ uv sync
 $ uv run describe-it --help
 ```
 
-To use it from another project, install it straight from the repository (which
-needs access to it):
+To track the repository instead of a release, install straight from it:
 
 ```console
-$ uv add git+ssh://git@github.com/Xof/describe-it
-$ pip install git+ssh://git@github.com/Xof/describe-it
+$ uv add git+https://github.com/Xof/describe-it
+$ pip install git+https://github.com/Xof/describe-it
 ```
-
-Once it is published, `uv add describe-it` will be the whole story.
 
 ## Usage
 

@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/describe-it
+      url: https://pypi.org/p/describe-image
     permissions:
       id-token: write
       contents: read

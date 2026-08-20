@@ -29,7 +29,7 @@ from describe_it.exceptions import (
 
 # Read from installed metadata rather than duplicated here, so pyproject.toml
 # stays the single place a version number is written down.
-__version__ = version("describe-it")
+__version__ = version("describe-image")
 
 __all__ = [
     "DEFAULT_HOST",
