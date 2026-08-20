@@ -6,7 +6,7 @@ from hypothesis import strategies as st
 
 from describe_it.exceptions import DescriptionError, DescriptionRefusedError
 from describe_it.prompt import (
-    INVISIBLE_RE,
+    EDGE_TRIM_RE,
     REFUSAL_RE,
     THINK_RE,
     UNCLOSED_THINK_RE,
@@ -15,6 +15,21 @@ from describe_it.prompt import (
 )
 
 _CONTEXT_SENTENCE = "The image appears in this context:"
+
+# Named, because these are invisible in a source file and a stray one would be
+# impossible to spot in a diff.
+_BOM = "﻿"
+_ZWSP = "​"
+_ZWNJ = "‌"
+_ZWJ = "‍"
+_WORD_JOINER = "⁠"
+
+# Text that needs its zero-width characters: Persian (ZWNJ separates the prefix
+# from the verb), Hindi (ZWJ forces the conjunct form), and an emoji sequence
+# held together by ZWJ. Deleting them corrupts the words.
+_PERSIAN = f"می{_ZWNJ}خواهم"
+_HINDI = f"क्{_ZWJ}ष"
+_FAMILY = f"👨{_ZWJ}👩{_ZWJ}👧"
 
 # Every opening phrase the heuristic knows, as a model would actually write it
 # — including the typographic apostrophes a model produces at least as often
@@ -61,6 +76,7 @@ _CLEANING_CASES = [
     ("<think>\nmulti\nline\n</think>\n\nA grey cat.", "A grey cat."),
     ("<THINK>upper</THINK> A grey cat.", "A grey cat."),
     ("A grey cat. <think>trailing thought never closed", "A grey cat."),
+    ('"A grey cat. <think>"', "A grey cat."),
     ("Alt text: A grey cat.", "A grey cat."),
     ("alt:A grey cat.", "A grey cat."),
     ("ALT TEXT : A grey cat.", "A grey cat."),
@@ -68,15 +84,20 @@ _CLEANING_CASES = [
     ("**Alt text**: A grey cat.", "A grey cat."),
     ("`Alt:` A grey cat.", "A grey cat."),
     ("_Alt text:_ A grey cat.", "A grey cat."),
+    ("Alt text: *A cat* sits on a mat.", "*A cat* sits on a mat."),
+    ("**Alt text: A grey cat.**", "A grey cat."),
     ('"A grey cat."', "A grey cat."),
     ("'A grey cat.'", "A grey cat."),
     ("“A grey cat.”", "A grey cat."),
     ("‘A grey cat.’", "A grey cat."),
     ("`A grey cat.`", "A grey cat."),
     ("```A grey cat.```", "A grey cat."),
+    ("```a grey cat.```", "a grey cat."),
     ("```\nA grey cat.\n```", "A grey cat."),
     ("```text\nA grey cat.\n```", "A grey cat."),
     ("```json\nA grey cat.\n```", "A grey cat."),
+    ("```text A grey cat.```", "A grey cat."),
+    ("```md A grey cat.```", "A grey cat."),
     ("**A grey cat.**", "A grey cat."),
     ("*A grey cat.*", "A grey cat."),
     ("_A grey cat._", "A grey cat."),
@@ -84,8 +105,11 @@ _CLEANING_CASES = [
     ('**"Alt text: A grey cat."**', "A grey cat."),
     ("A grey cat\n\nasleep   on\ta red chair.", "A grey cat asleep on a red chair."),
     ("A cat *sitting* on a mat.", "A cat *sitting* on a mat."),
-    ("﻿A grey cat.", "A grey cat."),
-    ("A​cat", "Acat"),
+    (f"{_BOM}A grey cat.", "A grey cat."),
+    (f'"{_ZWSP}A grey cat."', "A grey cat."),
+    # Apostrophes are not closing quotes: single-quoted text still unwraps.
+    ("'A child's drawing of a house.'", "A child's drawing of a house."),
+    ("‘A child’s drawing of a house.’", "A child’s drawing of a house."),
     # Balance: quoted fragments at both ends are text, not wrapping.
     (
         '"Hello" is written on the sign, which reads "Bye"',
@@ -95,7 +119,21 @@ _CLEANING_CASES = [
         "'Hello' is written on the sign, which reads 'Bye'",
         "'Hello' is written on the sign, which reads 'Bye'",
     ),
+    ("'A cat.' 'A dog.'", "'A cat.' 'A dog.'"),
     ("*Red* balloons and *blue* ones.", "*Red* balloons and *blue* ones."),
+]
+
+# Zero-width characters that carry meaning must survive in the interior.
+_PRESERVED_CASES = [
+    (_PERSIAN, _PERSIAN),
+    (_HINDI, _HINDI),
+    (_FAMILY, _FAMILY),
+    (
+        f"A sign reading {_PERSIAN} above the door.",
+        f"A sign reading {_PERSIAN} above the door.",
+    ),
+    (f"A{_ZWSP}cat", f"A{_ZWSP}cat"),
+    (f'"{_FAMILY} on a bench."', f"{_FAMILY} on a bench."),
 ]
 
 _EMPTY_CASES = [
@@ -105,7 +143,7 @@ _EMPTY_CASES = [
     "<think>only thinking</think>",
     "<think>a</think>\n  \n",
     "<think>thinking forever about this cat.",
-    "﻿​⁠",
+    f"{_BOM}{_ZWSP}{_WORD_JOINER}",
     "**  **",
     '""',
     "**",
@@ -113,6 +151,7 @@ _EMPTY_CASES = [
     "*",
     "`",
     "_",
+    "* * *",
 ]
 
 
@@ -142,6 +181,8 @@ def test_build_prompt_includes_the_context_sentence_when_given() -> None:
     [
         ("ends with period.", "ends with period."),
         ("ends with periods...", "ends with periods."),
+        ("ends with ?", "ends with."),
+        ("ends with!", "ends with."),
         ("  padded\n\tand   spaced  ", "padded and spaced."),
     ],
 )
@@ -152,9 +193,11 @@ def test_build_prompt_tidies_the_context(context: str, expected: str) -> None:
 
     assert f"{_CONTEXT_SENTENCE} {expected}" in prompt
     assert ".." not in prompt
+    assert "?." not in prompt
+    assert "!." not in prompt
 
 
-@pytest.mark.parametrize("context", [None, "", "   \n ", "..."])
+@pytest.mark.parametrize("context", [None, "", "   \n ", "...", "?!"])
 def test_build_prompt_omits_the_context_sentence_when_blank(
     context: str | None,
 ) -> None:
@@ -182,12 +225,12 @@ def test_blank_explicit_prompt_is_rejected(prompt: str) -> None:
         build_prompt(max_words=30, language="English", context=None, prompt=prompt)
 
 
-@pytest.mark.parametrize(("raw", "expected"), _CLEANING_CASES)
+@pytest.mark.parametrize(("raw", "expected"), _CLEANING_CASES + _PRESERVED_CASES)
 def test_clean_response_table(raw: str, expected: str) -> None:
     assert clean_response(raw) == expected
 
 
-@pytest.mark.parametrize(("raw", "expected"), _CLEANING_CASES)
+@pytest.mark.parametrize(("raw", "expected"), _CLEANING_CASES + _PRESERVED_CASES)
 def test_clean_response_is_idempotent_on_the_table(raw: str, expected: str) -> None:
     assert clean_response(clean_response(raw)) == expected
 
@@ -210,9 +253,10 @@ def test_refusals_raise_with_the_cleaned_text_attached(raw: str) -> None:
     assert caught.value.response == raw
 
 
-def test_invisible_characters_do_not_hide_a_refusal() -> None:
+@pytest.mark.parametrize("prefix", [_BOM, _ZWSP, _ZWNJ, _ZWJ, _WORD_JOINER])
+def test_invisible_characters_do_not_hide_a_refusal(prefix: str) -> None:
     with pytest.raises(DescriptionRefusedError) as caught:
-        clean_response("﻿I cannot describe this.")
+        clean_response(f"{prefix}I cannot describe this.")
 
     assert caught.value.response == "I cannot describe this."
 
@@ -274,12 +318,16 @@ def test_think_patterns_span_newlines_and_ignore_case() -> None:
     assert UNCLOSED_THINK_RE.sub("", "kept <THINK>\nrambling") == "kept "
 
 
-def test_invisible_pattern_covers_the_zero_width_family() -> None:
-    assert INVISIBLE_RE.sub("", "a﻿​‌‍⁠b") == "ab"
+def test_edge_trim_pattern_leaves_the_interior_alone() -> None:
+    padded = f"{_BOM}{_ZWSP} {_PERSIAN} {_ZWJ}"
+
+    assert EDGE_TRIM_RE.sub("", padded) == _PERSIAN
 
 
 _SAFE_BODY = st.text(
-    alphabet=st.sampled_from(list("acinost e.,'’“”*_`\n")), min_size=2, max_size=40
+    alphabet=st.sampled_from([*list("acinost e.,'’“”*_`\n"), _ZWSP, _ZWJ]),
+    min_size=2,
+    max_size=40,
 )
 _LABELS = st.sampled_from(["", "Alt text: ", "alt:", "**ALT TEXT :** "])
 

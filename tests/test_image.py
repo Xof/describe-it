@@ -241,9 +241,7 @@ def test_greyscale_colour_key_transparency_is_flattened() -> None:
     [
         ("I;16", (0, 32768, 65535)),
         ("I;16L", (0, 32768, 65535)),
-        # I;16N is missing here on purpose: PIL's own I;16N unpacker is 8-bit,
-        # so nothing this library does can recover the high byte. It is still
-        # covered above as a mode that prepares without error.
+        ("I;16N", (0, 32768, 65535)),
         ("I", (0, 50000, 100000)),
         ("F", (-1.0, 0.0, 1.0)),
     ],
@@ -290,12 +288,66 @@ def test_infinite_float_samples_keep_the_finite_bands_visible() -> None:
     assert light > 215
 
 
-def test_nan_float_samples_still_produce_a_jpeg() -> None:
+def test_nan_float_samples_do_not_disturb_the_rescale() -> None:
+    # PIL's getextrema() ignores nan, so the finite range is still (0, 200) and
+    # the normal rescale runs: the finite bands span black to white and the nan
+    # band itself lands on black. Pinned because it is the one wide-mode input
+    # whose outcome comes from PIL's arithmetic rather than ours.
     image = _banded("F", (0.0, 200.0, float("nan")))
 
     decoded = _decode(prepare_image(image, max_size=None))
 
     assert decoded.size == (96, 32)
+    dark, bright, not_a_number = (_pixel(decoded, (x, 16))[0] for x in (16, 48, 80))
+    assert dark < 15
+    assert bright > 245
+    assert not_a_number < 15
+
+
+def test_native_byte_order_16bit_keeps_full_precision() -> None:
+    # I;16N goes through PIL's 8-bit unpacker, which clamps every sample to
+    # 255; its bytes are reinterpreted instead, so the four levels stay apart.
+    image = _banded("I;16N", (0, 32767, 32768, 65535))
+
+    decoded = _decode(prepare_image(image, max_size=None))
+
+    black, half, half_up, white = (
+        _pixel(decoded, (x, 16))[0] for x in (16, 48, 80, 112)
+    )
+    assert black < 10
+    assert abs(half - 127) <= 4
+    assert abs(half_up - 127) <= 4
+    assert white > 245
+
+
+def test_bogus_transparency_key_is_ignored() -> None:
+    # info["transparency"] holds whatever the encoder wrote. PIL raises
+    # TypeError on a string, and a broken hint must not cost the caller their
+    # description.
+    image = Image.new("RGB", (64, 32), _RED)
+    image.paste(_BLUE, (32, 0, 64, 32))
+    image.info["transparency"] = "nope"
+
+    decoded = _decode(prepare_image(image, max_size=None))
+
+    _assert_close(_pixel(decoded, (16, 16)), _RED)
+    _assert_close(_pixel(decoded, (48, 16)), _BLUE)
+
+
+def test_wide_mode_ignores_a_colour_key() -> None:
+    # A 16-bit PNG can carry tRNS, but the key names a raw sample value and
+    # rescaling moves every sample, so the key is documented as ignored: the
+    # keyed band comes out mid-grey rather than white.
+    source = _banded("I;16", (0, 30000, 60000))
+    buffer = io.BytesIO()
+    source.save(buffer, format="PNG", transparency=30000)
+    image = Image.open(io.BytesIO(buffer.getvalue()))
+    assert image.mode == "I;16"
+    assert image.info["transparency"] == 30000
+
+    decoded = _decode(prepare_image(image, max_size=None))
+
+    _assert_three_grey_bands(decoded)
 
 
 def test_exif_orientation_is_applied_before_conversion() -> None:

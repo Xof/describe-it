@@ -7,8 +7,10 @@ wide (16/32-bit integer and float) modes whose samples do not fit in a byte. It
 is pure — no network, no filesystem, no mutation of the caller's image.
 """
 
+import contextlib
 import io
 import math
+import sys
 from typing import cast
 
 from PIL import Image, ImageOps
@@ -26,6 +28,9 @@ _JPEG_QUALITY = 90
 # model dutifully describes the halo.
 _BACKGROUND = (255, 255, 255, 255)
 
+# EXIF tag 0x0112. Value 1 means "already upright".
+_ORIENTATION_TAG = 0x0112
+
 # Modes with an alpha channel, including the premultiplied variants. These are
 # routed through RGBA so the alpha is composited rather than discarded.
 _ALPHA_MODES = frozenset({"LA", "La", "PA", "RGBA", "RGBa"})
@@ -38,10 +43,13 @@ _WIDE_MODES = frozenset({"F", "I", "I;16", "I;16B", "I;16L", "I;16N"})
 # The byte-order-tagged 16-bit rawmodes. PIL exposes them as image modes but
 # implements almost nothing for them — `getextrema()` and `point()` both raise
 # "image has wrong mode" — so they are normalised to `I` before any arithmetic.
-# I;16L and I;16B survive that conversion with all 16 bits; I;16N ("native
-# order") does not, because PIL's own unpacker for it is 8-bit. Nothing here
-# can recover those bits, but the image still converts instead of failing.
 _TAGGED_16BIT_PREFIX = "I;16"
+
+# I;16N ("native byte order") is the one that cannot simply be converted: PIL
+# routes it through an 8-bit unpacker and clamps every sample to 255. Its bytes
+# are perfectly good, though, so they are reinterpreted as the explicit
+# byte-order mode this machine actually uses.
+_NATIVE_16BIT_MODE = "I;16" if sys.byteorder == "little" else "I;16B"
 
 
 def prepare_image(image: Image.Image, max_size: int | None = 1024) -> bytes:
@@ -92,12 +100,13 @@ def prepare_image(image: Image.Image, max_size: int | None = 1024) -> bytes:
         # halfway through encoding.
         image.load()
         # Orientation before anything else. A phone photo is stored in sensor
-        # order with the rotation in EXIF; skip this and portrait pictures are
-        # described sideways. exif_transpose() returns a new image unless asked
-        # to work in place, so the caller's object is untouched, and it drops
-        # the orientation tag from what it returns.
-        working = ImageOps.exif_transpose(image)
-        rgb = _to_rgb(working)
+        # order with the rotation in a tag; skip this and portrait pictures are
+        # described sideways. The tag does not survive into the JPEG, which is
+        # written without EXIF.
+        upright = _apply_orientation(image)
+        # `upright is image` exactly when there was nothing to rotate, which is
+        # also exactly when the result is still the caller's object.
+        rgb = _to_rgb(upright, owned=upright is not image)
         if max_size is not None:
             # thumbnail() resizes in place and never enlarges, which is exactly
             # the "longer edge <= max_size" rule; `rgb` is always a fresh image
@@ -118,29 +127,56 @@ def prepare_image(image: Image.Image, max_size: int | None = 1024) -> bytes:
     return buffer.getvalue()
 
 
-def _to_rgb(image: Image.Image) -> Image.Image:
-    """Return a new RGB image with the same visible content as `image`.
+def _apply_orientation(image: Image.Image) -> Image.Image:
+    """Return the image the right way up according to its EXIF orientation.
+
+    Args:
+        image: The image to inspect.
+
+    Returns:
+        A rotated copy, or the argument itself when the image is already
+        upright — the overwhelmingly common case, which should not pay for a
+        full copy. Callers must therefore not mutate the result unless it is a
+        different object from what they passed in.
+    """
+    if image.getexif().get(_ORIENTATION_TAG, 1) == 1:
+        return image
+    return ImageOps.exif_transpose(image)
+
+
+def _to_rgb(image: Image.Image, *, owned: bool) -> Image.Image:
+    """Return an RGB image with the same visible content as `image`.
 
     Args:
         image: The image to convert; it is not modified.
+        owned: True when `image` is already a private copy that this function
+            may hand back as-is. False when it belongs to the caller of the
+            library, in which case a copy is made even if no conversion is
+            needed.
 
     Returns:
-        A freshly allocated RGB image, safe to resize in place.
+        An RGB image that is safe to resize in place.
     """
     mode = image.mode
     if mode in _WIDE_MODES:
-        working = image.convert("I") if mode.startswith(_TAGGED_16BIT_PREFIX) else image
-        return _rescale_to_grey(working).convert("RGB")
+        # Checked before transparency deliberately. A colour key on a wide
+        # image names a raw sample value, and normalising the samples to 0..255
+        # invalidates it; there is no honest way to honour the key afterwards,
+        # so wide images are described opaque. The errata say so.
+        return _rescale_to_grey(_to_narrow_wide_mode(image)).convert("RGB")
     # `info["transparency"]` is how PNG colour-key and palette transparency
     # arrive, in every mode from P to RGB to L. Converting such an image
     # straight to RGB paints the keyed colour instead of honouring it, so
     # anything carrying the key goes through RGBA and gets composited.
     if "transparency" in image.info or mode in _ALPHA_MODES:
-        return _flatten_alpha(_to_rgba(image))
+        # The key is whatever the encoder wrote there. PIL raises TypeError on
+        # a value it cannot use (a string, None, a tuple of the wrong length),
+        # and a broken hint is no reason to refuse an otherwise fine image:
+        # fall through and describe it opaque.
+        with contextlib.suppress(TypeError, ValueError):
+            return _flatten_alpha(_to_rgba(image))
     if mode == "RGB":
-        # convert() to the same mode already copies, but say so explicitly:
-        # the result is about to be resized in place.
-        return image.copy()
+        return image if owned else image.copy()
     return image.convert("RGB")
 
 
@@ -160,6 +196,31 @@ def _to_rgba(image: Image.Image) -> Image.Image:
     return image.convert("RGBA")
 
 
+def _to_narrow_wide_mode(image: Image.Image) -> Image.Image:
+    """Return a wide-sample image in a mode that supports arithmetic.
+
+    Args:
+        image: An image in one of `_WIDE_MODES`.
+
+    Returns:
+        The image as `I` or `F`, with all of its samples intact.
+    """
+    mode = image.mode
+    if mode == "I;16N":
+        # Reinterpret rather than convert: PIL's I;16N conversion clamps every
+        # sample to 255. "Native" means this machine's byte order by
+        # definition, so reading the same bytes back as the explicit mode is
+        # lossless.
+        native = Image.frombytes(_NATIVE_16BIT_MODE, image.size, image.tobytes())
+        return native.convert("I")
+    if mode.startswith(_TAGGED_16BIT_PREFIX):
+        # getextrema() and point() reject the tagged 16-bit modes outright
+        # ("image has wrong mode"); I carries the same samples and supports
+        # both.
+        return image.convert("I")
+    return image
+
+
 def _rescale_to_grey(image: Image.Image) -> Image.Image:
     """Map a wide-sample image linearly onto 8-bit greyscale.
 
@@ -173,11 +234,13 @@ def _rescale_to_grey(image: Image.Image) -> Image.Image:
     # pair; the declared union covers the multi-band case this never sees.
     low, high = cast("tuple[float, float]", image.getextrema())
     if not (math.isfinite(low) and math.isfinite(high)):
-        # An F image with inf or nan samples — a depth map with holes, say —
-        # has no usable range: scaling against it would map every finite
+        # An F image with an infinite sample — a depth map with holes, say —
+        # has no usable range: scaling against inf would map every finite
         # sample to black. PIL's own conversion clamps to 0..255 instead, which
-        # keeps the finite part visible. Known limitation: a non-finite sample
-        # costs the image its dynamic-range normalisation.
+        # keeps the finite part visible. Known limitation: one infinite sample
+        # costs the image its dynamic-range normalisation. (nan never gets
+        # here: getextrema() ignores nan, so the range stays finite and the
+        # nan pixels come out black on their own.)
         return image.convert("L")
     if high <= low:
         # Constant image: there is no contrast to preserve and the scale factor

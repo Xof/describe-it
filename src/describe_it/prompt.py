@@ -11,10 +11,14 @@ import re
 
 from describe_it.exceptions import DescriptionError, DescriptionRefusedError
 
-# Zero-width characters and the BOM. Models copy them out of their training
-# data; left in place they sit in front of the text and defeat every anchored
-# pattern below, so they are the very first thing removed.
-INVISIBLE_RE = re.compile("[\ufeff\u200b\u200c\u200d\u2060]")
+# Whitespace plus the BOM and the zero-width family. Trimmed from the ends of
+# the text and of every decoration layer, never from the middle: ZWJ and ZWNJ
+# are orthographically required in Persian, Urdu, Hindi, Sinhala and Malayalam,
+# they hold emoji sequences together, and Thai and Khmer use ZWSP as their word
+# separator. Deleting those would corrupt the description; leaving one in front
+# of the text would defeat every anchored pattern below, hence: edges only.
+_EDGE_CLASS = r"[\s\ufeff\u200b\u200c\u200d\u2060]"
+EDGE_TRIM_RE = re.compile(rf"^{_EDGE_CLASS}+|{_EDGE_CLASS}+\Z")
 
 # Thinking-capable models are asked not to think (`think: false`), but some
 # emit a block anyway; strip it rather than caption an image with the model's
@@ -34,21 +38,28 @@ REFUSAL_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Markdown emphasis markers, which models like to wrap around a label as well
-# as around the text: `**Alt text:**`, `**Alt text**:`.
-_EMPHASIS = r"[*_`]{0,3}"
-
-# "Alt text:", "Alt:", "ALT TEXT :", "**Alt text:**" — models label their
-# answer even when told not to.
+# "Alt text:", "Alt:", "ALT TEXT :", "**Alt text:**", "**Alt text**:" — models
+# label their answer even when told not to. Emphasis after the label is only
+# consumed when it closes emphasis that opened before it (the backreference);
+# otherwise "Alt text: *A cat* sits" would lose the opening marker of the
+# following phrase.
 _LABEL_RE = re.compile(
-    rf"^{_EMPHASIS}\s*alt(?:\s+text)?\s*{_EMPHASIS}\s*:\s*{_EMPHASIS}\s*",
+    r"^(?P<emphasis>[*_`]{0,3})\s*alt(?:\s+text)?\s*(?P=emphasis)?\s*"
+    r":\s*(?P=emphasis)?\s*",
     re.IGNORECASE,
 )
 
-# A fenced code block, with the info string ("```text") the fence may carry.
-# Matched separately from the plain wrapper pairs because the info string runs
-# to the first newline and would otherwise be left in the alt text.
-_FENCE_RE = re.compile(r"^```[^\n]*\n(?P<body>.*?)\n?```\Z", re.DOTALL)
+# Info strings worth recognising on a single-line fence, where there is no
+# newline to mark where the info string ends. Anything goes before a newline;
+# without one, only these, so that "```a cat.```" keeps its first word.
+_FENCE_INFO = "text|markdown|md|json|plaintext|plain"
+
+# A fenced code block. The info string ("```text") runs to the first newline
+# and would otherwise be left at the head of the alt text.
+_FENCE_RE = re.compile(
+    rf"^```(?:[^\n]*\n|(?:{_FENCE_INFO})[ \t]+)?(?P<body>.*?)\n?```\Z",
+    re.DOTALL | re.IGNORECASE,
+)
 
 # Opening/closing pairs a model wraps its answer in. Longer markers first so
 # that ``` is not mistaken for `, ** for *, or __ for _. The last four are the
@@ -66,9 +77,18 @@ _WRAPPERS: tuple[tuple[str, str], ...] = (
     ("‘", "’"),
 )
 
-# Every character that can appear as decoration. A reply made of nothing else
-# is not a description, however many characters long it is.
-_MARKER_CHARS = frozenset("`*_\"'“”‘’")
+# An apostrophe is the same character as a closing single quote. One sitting
+# between two word characters ("a child's drawing") is punctuation and must not
+# count as a second closer, or nothing single-quoted would ever be unwrapped.
+_APOSTROPHE_RE = {
+    "'": re.compile(r"(?<!\w)'|'(?!\w)"),
+    "’": re.compile(r"(?<!\w)’|’(?!\w)"),
+}
+
+# Every character that can appear as decoration, plus the space left behind
+# once whitespace is collapsed. A reply made of nothing else is not a
+# description, however many characters long it is.
+_DECORATION_CHARS = "`*_\"'“”‘’ "
 
 # A refusal is short, or it rambles before its first sentence break. A real
 # description that happens to start "I cannot see any faces..." closes that
@@ -91,8 +111,8 @@ def build_prompt(
         language: Output language, as a plain English name the model knows.
         context: Where the image appears ("product photo on a shoe listing").
             `None` or blank omits the context sentence entirely. Trailing
-            periods and stray whitespace are tidied so the sentence reads
-            properly however the caller phrased it.
+            sentence punctuation and stray whitespace are tidied so the
+            sentence reads properly however the caller phrased it.
         prompt: A complete replacement for the built-in wording. When given, it
             is returned verbatim and every other argument is ignored — the
             caller has taken ownership of the wording.
@@ -120,9 +140,10 @@ def build_prompt(
         f" {language}.",
     ]
     if context is not None:
-        # The context is interpolated into a sentence of ours, so a caller who
-        # wrote their own full stop must not get two.
-        trimmed = " ".join(context.split()).rstrip(".")
+        # The context is interpolated into a sentence of ours, which supplies
+        # the full stop; a caller who ended their phrase with punctuation of
+        # their own must not get two.
+        trimmed = " ".join(context.split()).rstrip(" .!?")
         if trimmed:
             lines.append(f"The image appears in this context: {trimmed}.")
     lines.append("Reply with the alt text only.")
@@ -143,13 +164,9 @@ def clean_response(text: str) -> str:
         DescriptionError: If nothing is left after cleaning.
         DescriptionRefusedError: If the reply reads as a refusal.
     """
-    cleaned = INVISIBLE_RE.sub("", text)
-    cleaned = THINK_RE.sub("", cleaned)
-    cleaned = UNCLOSED_THINK_RE.sub("", cleaned)
-    cleaned = _strip_decorations(cleaned)
-    cleaned = " ".join(cleaned.split())
+    cleaned = " ".join(_strip_decorations(text).split())
 
-    if not cleaned or all(char in _MARKER_CHARS for char in cleaned):
+    if not cleaned.strip(_DECORATION_CHARS):
         raise DescriptionError("model returned no text")
     if _looks_like_refusal(cleaned):
         raise DescriptionRefusedError(cleaned)
@@ -157,27 +174,46 @@ def clean_response(text: str) -> str:
 
 
 def _strip_decorations(text: str) -> str:
-    """Remove fences, label prefixes and wrapping markers until none are left.
+    """Remove fences, wrappers, labels and thinking blocks until none are left.
 
     One pass would cover a well-behaved model, but they stack decoration
     (`**"Alt text: A grey cat."**`), and `clean_response` is contracted to be
     idempotent — `clean(clean(x)) == clean(x)` — which only a fixed point
     delivers. Each pass strictly shortens the string, so the loop terminates.
 
+    Wrappers are stripped before thinking blocks within a pass: a reply ending
+    `<think>` inside its closing quote (`"A cat. <think>"`) would otherwise
+    lose the quote first and never be unwrapped.
+
     Args:
-        text: Text with thinking blocks already removed.
+        text: The model's reply.
 
     Returns:
         The text with surrounding decoration removed and the ends trimmed.
     """
-    current = text.strip()
+    current = _trim_edges(text)
     while True:
         stripped = _strip_fence(current)
+        stripped = _strip_wrapper(stripped)
         stripped = _LABEL_RE.sub("", stripped)
-        stripped = _strip_wrapper(stripped).strip()
+        stripped = THINK_RE.sub("", stripped)
+        stripped = _trim_edges(UNCLOSED_THINK_RE.sub("", stripped))
         if stripped == current:
             return current
         current = stripped
+
+
+def _trim_edges(text: str) -> str:
+    """Remove whitespace and zero-width characters from both ends.
+
+    Args:
+        text: The text to trim.
+
+    Returns:
+        The text without leading or trailing whitespace, BOM or zero-width
+        characters. Interior ones are left exactly where the model put them.
+    """
+    return EDGE_TRIM_RE.sub("", text)
 
 
 def _strip_fence(text: str) -> str:
@@ -187,8 +223,7 @@ def _strip_fence(text: str) -> str:
         text: The text to unfence.
 
     Returns:
-        The fence's body, or the text unchanged if it is not a fenced block
-        with an info string or a newline after the opening fence.
+        The fence's body, or the text unchanged if it is not a fenced block.
     """
     match = _FENCE_RE.match(text)
     if match is None:
@@ -214,13 +249,30 @@ def _strip_wrapper(text: str) -> str:
             # A single marker character matches both ends of itself.
             continue
         interior = text[len(opener) : -len(closer)]
-        if closer in interior:
+        if _closer_recurs(closer, interior):
             # Unbalanced, so these are not wrapping markers: the text quotes
             # something ("Hello" is written on the sign, which reads "Bye")
             # and stripping the ends would mangle it.
             continue
         return interior
     return text
+
+
+def _closer_recurs(closer: str, interior: str) -> bool:
+    """Report whether a closing marker appears again inside the text.
+
+    Args:
+        closer: The closing marker of the candidate wrapper pair.
+        interior: The text between the candidate opening and closing markers.
+
+    Returns:
+        True if the interior contains the closer in a position that makes the
+        pair unbalanced. Apostrophes between word characters do not count.
+    """
+    apostrophe = _APOSTROPHE_RE.get(closer)
+    if apostrophe is not None:
+        return apostrophe.search(interior) is not None
+    return closer in interior
 
 
 def _looks_like_refusal(text: str) -> bool:
