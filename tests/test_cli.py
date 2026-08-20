@@ -18,6 +18,8 @@ import importlib.metadata
 import inspect
 import io
 import os
+import sys
+import warnings
 from pathlib import Path
 
 import pytest
@@ -58,6 +60,36 @@ def _animation_file(directory: Path, name: str = "frames.gif") -> Path:
 def _reply(content: str) -> dict[str, object]:
     """Return an /api/chat body carrying one assistant message."""
     return {"message": {"role": "assistant", "content": content}}
+
+
+class _RecordingWriter(io.StringIO):
+    """A stdout stand-in that records writes and flushes in the order they came."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[str] = []
+
+    def write(self, text: str) -> int:
+        self.events.append(text)
+        return len(text)
+
+    def flush(self) -> None:
+        self.events.append("<flush>")
+
+
+class _BrokenPipeWriter(io.TextIOBase):
+    """A stdout stand-in that behaves like a pipe whose reader has gone away."""
+
+    def __init__(self, fd: int) -> None:
+        # A real descriptor, so that the handler's dup2 has somewhere to point
+        # that is not the test runner's own stdout.
+        self._fd = fd
+
+    def write(self, text: str) -> int:
+        raise BrokenPipeError(errno.EPIPE, os.strerror(errno.EPIPE))
+
+    def fileno(self) -> int:
+        return self._fd
 
 
 def test_one_file_prints_the_description_alone(
@@ -122,8 +154,9 @@ def test_a_file_that_is_not_an_image_never_reaches_the_server(
     captured = capsys.readouterr()
     assert status == 1
     assert captured.out == ""
-    # Pillow's own error, which carries no errno to report in its place.
-    assert captured.err.startswith(f"describe-it: {path}: cannot identify image file")
+    # Pillow's own error, which carries no errno to report in its place — and
+    # whose message ends with the path the line already starts with, trimmed.
+    assert captured.err == f"describe-it: {path}: cannot identify image file\n"
     assert server.requests == []
 
 
@@ -335,6 +368,105 @@ def test_one_describer_serves_the_whole_run(
     assert len(server.requests) == 2
 
 
+def test_a_path_with_control_characters_still_produces_one_line_each(
+    server: FakeOllama, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # POSIX filenames may contain tabs and newlines. Unescaped, the first would
+    # forge a column and the second would split one record into two, which is
+    # how a batch consumer silently loses or mispairs a description.
+    server.script_json("/api/chat", _reply("A red rectangle."))
+    awkward = _image_file(tmp_path, "two\tcolumns\nand a line.png")
+    missing = tmp_path / "gone\there.png"
+
+    status = cli.main(["--host", server.url, str(awkward), str(missing)])
+
+    captured = capsys.readouterr()
+    assert status == 1
+    escaped = f"{tmp_path}/two\\tcolumns\\nand a line.png"
+    assert captured.out == f"{escaped}\tA red rectangle.\n"
+    assert captured.out.count("\n") == 1
+    assert captured.err.startswith(f"describe-it: {tmp_path}/gone\\there.png: ")
+    assert captured.err.count("\n") == 1
+
+
+def test_each_description_is_flushed_as_it_is_produced(
+    server: FakeOllama, tmp_path: Path
+) -> None:
+    # A batch of a thousand images is minutes of silence if stdout is only
+    # flushed at exit, and a reader on the other end of a pipe cannot tell that
+    # from a hung run.
+    server.script_json("/api/chat", _reply("A red rectangle."))
+    server.script_json("/api/chat", _reply("Another red rectangle."))
+    writer = _RecordingWriter()
+    first = _image_file(tmp_path, "first.png")
+    second = _image_file(tmp_path, "second.png")
+
+    status = cli.describe_files(
+        Describer(model="llava:7b", host=server.url),
+        [first, second],
+        context=None,
+        stdout=writer,
+        stderr=io.StringIO(),
+    )
+
+    assert status == 0
+    assert writer.events == [
+        f"{first}\tA red rectangle.",
+        "\n",
+        "<flush>",
+        f"{second}\tAnother red rectangle.",
+        "\n",
+        "<flush>",
+    ]
+
+
+def test_a_closed_output_pipe_ends_the_run_without_a_traceback(
+    server: FakeOllama, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `describe-it *.png | head` closes the pipe under a run that is still
+    # writing. Unhandled, that is a traceback plus an "Exception ignored" from
+    # the interpreter's own final flush.
+    server.script_json("/api/chat", _reply("A red rectangle."))
+    sink = os.open(tmp_path / "sink", os.O_WRONLY | os.O_CREAT)
+    monkeypatch.setattr(sys, "stdout", _BrokenPipeWriter(sink))
+
+    try:
+        status = cli.main(["--host", server.url, str(_image_file(tmp_path))])
+    finally:
+        os.close(sink)
+
+    assert status == 1
+
+
+def test_an_image_near_pillows_pixel_limit_is_described_without_a_warning(
+    server: FakeOllama,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Over the limit but under twice it, Pillow decodes the image and warns.
+    # The image is describable, so the run succeeds; the warning is suppressed
+    # because two more lines on stderr would break one-line-per-file.
+    server.script_json("/api/chat", _reply("A red rectangle."))
+    path = _image_file(tmp_path)
+    pixels = Image.open(path).size[0] * Image.open(path).size[1]
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", pixels - 1)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        status = cli.main(["--host", server.url, str(path)])
+
+    captured = capsys.readouterr()
+    assert status == 0
+    assert captured.out == "A red rectangle.\n"
+    assert captured.err == ""
+    assert not [
+        record
+        for record in caught
+        if issubclass(record.category, Image.DecompressionBombWarning)
+    ]
+
+
 def test_the_version_option_prints_the_package_version(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -376,17 +508,22 @@ def test_a_count_below_one_is_a_usage_error(
 
 
 @pytest.mark.parametrize("option", ["--max-words", "--max-image-size"])
-def test_a_count_that_is_not_a_number_is_a_usage_error(
-    option: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+# " 5 " and "1_0" are accepted by int() and mean 5 and 10; on a command line
+# both are typos, so the parser is stricter than the constructor it feeds.
+@pytest.mark.parametrize("value", ["lots", " 5 ", "1_0", "5.0", ""])
+def test_a_count_that_is_not_a_plain_number_is_a_usage_error(
+    option: str, value: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     with pytest.raises(SystemExit) as exit_info:
-        cli.main([option, "lots", str(_image_file(tmp_path))])
+        cli.main([option, value, str(_image_file(tmp_path))])
 
     assert exit_info.value.code == 2
     assert "not a whole number" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("value", ["0", "-1", "inf", "nan"])
+# "1e400" parses as a float and overflows to infinity, which is the one way an
+# infinite timeout can still reach the range check.
+@pytest.mark.parametrize("value", ["0", "-1", "1e400"])
 def test_a_timeout_that_is_not_positive_and_finite_is_a_usage_error(
     value: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -397,11 +534,12 @@ def test_a_timeout_that_is_not_positive_and_finite_is_a_usage_error(
     assert "positive, finite" in capsys.readouterr().err
 
 
-def test_a_timeout_that_is_not_a_number_is_a_usage_error(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("value", ["soon", "inf", "nan", " 5 ", "1_0", ""])
+def test_a_timeout_that_is_not_a_plain_number_is_a_usage_error(
+    value: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     with pytest.raises(SystemExit) as exit_info:
-        cli.main(["--timeout", "soon", str(_image_file(tmp_path))])
+        cli.main(["--timeout", value, str(_image_file(tmp_path))])
 
     assert exit_info.value.code == 2
     assert "not a number of seconds" in capsys.readouterr().err
@@ -442,11 +580,15 @@ def test_an_unusable_host_in_the_environment_is_a_usage_error(
     assert "must use http or https" in capsys.readouterr().err
 
 
-def test_a_blank_model_is_a_usage_error(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("option", ["--model", "--language"])
+@pytest.mark.parametrize("value", ["", "   "])
+def test_a_blank_model_or_language_is_a_usage_error(
+    option: str, value: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    # A blank model reaches the server as a puzzling 404; a blank language asks
+    # the model to write in nothing at all.
     with pytest.raises(SystemExit) as exit_info:
-        cli.main(["--model", "   ", str(_image_file(tmp_path))])
+        cli.main([option, value, str(_image_file(tmp_path))])
 
     assert exit_info.value.code == 2
     assert "must not be blank" in capsys.readouterr().err

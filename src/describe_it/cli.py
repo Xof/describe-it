@@ -6,15 +6,26 @@ Everything that is not argument parsing lives in `describe_files`, which is
 handed its output streams instead of reaching for the process's own, so the
 tests can drive a whole run and read exactly what it wrote.
 
+The output contract is one line per file, on stdout for a description and on
+stderr for a failure, so that a run can be piped into anything that reads
+lines. Three things defend it: whitespace in a diagnostic is collapsed, control
+characters in a path are escaped, and Pillow's decompression-bomb *warning* is
+suppressed (its error is still reported, as a normal failure line).
+
 Option values are validated by argparse `type` functions rather than left to
 `Describer`, because a typo in a flag deserves a usage message and exit status
-2, not a traceback out of a constructor. Nothing here runs at import time; the
-parser is built inside `main`.
+2, not a traceback out of a constructor. The two environment variables reach
+the describer without passing through one, so `main` turns the same `ValueError`
+into the same usage error. Nothing here runs at import time; the parser is
+built inside `main`.
 """
 
 import argparse
 import math
+import os
+import re
 import sys
+import warnings
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TextIO
@@ -33,6 +44,12 @@ _DEFAULT_LANGUAGE = "English"
 _DEFAULT_MAX_WORDS = 30
 _DEFAULT_MAX_IMAGE_SIZE = 1024
 
+# `int()` accepts surrounding whitespace and digit separators, so " 5 " and
+# "1_0" would silently become 5 and 10. On a command line both are typos, never
+# intentions, and the same goes for float()'s "inf" and "nan" spellings.
+_INTEGER_RE = re.compile(r"^[+-]?[0-9]+$")
+_DECIMAL_RE = re.compile(r"^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$")
+
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the describe-it command line.
@@ -42,7 +59,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             `sys.argv`, which is what the console script wants.
 
     Returns:
-        0 if every file was described, 1 if any of them failed.
+        0 if every file was described, 1 if any of them failed or if the output
+        pipe was closed early.
 
     Raises:
         SystemExit: For `--help`, `--version` and usage errors, which argparse
@@ -70,13 +88,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         # one. A misconfigured environment is still a configuration mistake and
         # deserves the same usage message, not a traceback.
         parser.error(str(exc))
-    return describe_files(
-        describer,
-        args.files,
-        context=args.context,
-        stdout=sys.stdout,
-        stderr=sys.stderr,
-    )
+
+    try:
+        return describe_files(
+            describer,
+            args.files,
+            context=args.context,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+    except BrokenPipeError:
+        # `describe-it *.png | head` closes the pipe while the run is still
+        # writing. The interpreter flushes stdout once more on the way out,
+        # which would raise a second time and print "Exception ignored"; giving
+        # the descriptor /dev/null to flush into is the recipe from the Python
+        # documentation for exactly this.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        os.close(devnull)
+        return 1
 
 
 def describe_files(
@@ -102,6 +132,10 @@ def describe_files(
 
     Returns:
         0 if every file was described, 1 if any of them failed.
+
+    Raises:
+        BrokenPipeError: If the reader of stdout has gone away. Left to the
+            caller, which has the process-level remedy.
     """
     # The path prefix is what makes a multi-file run parseable. A single file
     # is the interactive case, where the caller knows what they asked about and
@@ -111,19 +145,17 @@ def describe_files(
     for path in paths:
         try:
             description = describe_file(describer, path, context=context)
-        # DecompressionBombError is not an OSError and fires out of
-        # Image.open, before `prepare_image` gets the chance to wrap it: a
-        # caller who points the CLI at a 200-megapixel scan should get the same
-        # one-line report as for any other file that could not be read.
         except (OSError, Image.DecompressionBombError, DescribeItError) as exc:
             failed = True
-            # stderr is unbuffered and a redirected stdout is not, so without
-            # this the diagnostics of a redirected run all arrive before the
-            # descriptions they interleave with.
-            stdout.flush()
-            print(f"describe-it: {path}: {_reason(exc)}", file=stderr)
+            print(f"describe-it: {_escape(path)}: {_reason(exc, path)}", file=stderr)
             continue
-        print(f"{path}\t{description}" if show_path else description, file=stdout)
+        line = f"{_escape(path)}\t{description}" if show_path else description
+        # Flushed per line so that a reader on the other end of a pipe sees
+        # each description as it is produced rather than when the run ends —
+        # a batch of a thousand images is minutes of silence otherwise. It also
+        # keeps stdout and stderr in the order they were written, since stderr
+        # is unbuffered and a redirected stdout is not.
+        print(line, file=stdout, flush=True)
     return 1 if failed else 0
 
 
@@ -142,22 +174,45 @@ def describe_file(describer: Describer, path: Path, *, context: str | None) -> s
         OSError: If the file cannot be read, or holds nothing Pillow can
             identify as an image — `PIL.UnidentifiedImageError` is an `OSError`.
         PIL.Image.DecompressionBombError: If the image is large enough to trip
-            Pillow's bomb guard, which is checked as the file is opened.
+            Pillow's hard bomb guard, which is checked as the file is opened.
         DescribeItError: If the image cannot be prepared, the server cannot be
             reached, or no usable description came back.
     """
-    # The `with` is load-bearing: Image.open holds the file open until the
-    # image is closed, and a run over a few thousand files would otherwise
-    # exhaust the process's descriptors long before it finished.
-    with Image.open(path) as image:
-        return describer.describe(image, context=context)
+    with warnings.catch_warnings():
+        # An image over Pillow's pixel limit but under twice it decodes fine
+        # and only warns. The warning would reach stderr as two more lines and
+        # break the one-line-per-file contract, and it is not a failure — the
+        # image is described. The hard guard above twice the limit still raises
+        # and is still reported as a failure.
+        warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+        # The `with` is load-bearing: Image.open holds the file open until the
+        # image is closed, and a run over a few thousand files would otherwise
+        # exhaust the process's descriptors long before it finished.
+        with Image.open(path) as image:
+            return describer.describe(image, context=context)
 
 
-def _reason(exc: Exception) -> str:
+def _escape(path: Path) -> str:
+    """Render a path so that it cannot break the one-line-per-file contract.
+
+    Args:
+        path: The path as the caller wrote it.
+
+    Returns:
+        The path with backslashes, tabs and newlines escaped. A filename may
+        legally contain both a tab and a newline on POSIX, either of which
+        would otherwise split one record into two or forge a column.
+    """
+    # Backslash first, or the escapes introduced below would be escaped again.
+    return str(path).replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
+
+
+def _reason(exc: Exception, path: Path) -> str:
     """Render one failure as a single line of diagnosis.
 
     Args:
         exc: The failure to describe.
+        path: The file it happened on, which the caller has already named.
 
     Returns:
         The message on one line. A server's error body can carry newlines, and
@@ -167,6 +222,12 @@ def _reason(exc: Exception) -> str:
     # caller has already put in the message. Pillow's own errors (a file that
     # is not an image) carry no strerror and are reported whole.
     detail = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
+    # Pillow ends "cannot identify image file '<path>'" with the path it was
+    # given, which the line already starts with. Trimmed only when it really is
+    # a repeat, so a message that merely mentions another path keeps it.
+    repeated = f" {str(path)!r}"
+    if detail.endswith(repeated):
+        detail = detail[: -len(repeated)]
     return " ".join(detail.split())
 
 
@@ -187,7 +248,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        type=_model,
+        type=_nonblank,
         metavar="TAG",
         help=(
             f"Ollama model tag; must be vision-capable. "
@@ -205,7 +266,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_seconds,
         default=_DEFAULT_TIMEOUT,
         metavar="SECONDS",
-        help="Per-request socket timeout. Default: %(default)s.",
+        help="Per-read socket timeout. Default: %(default)s.",
     )
     parser.add_argument(
         "--context",
@@ -217,6 +278,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--language",
+        type=_nonblank,
         default=_DEFAULT_LANGUAGE,
         metavar="NAME",
         help="Output language, as a plain English name. Default: %(default)s.",
@@ -256,21 +318,22 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _model(text: str) -> str:
-    """Parse a model tag.
+def _nonblank(text: str) -> str:
+    """Parse a value that must say something.
 
     Args:
         text: The raw argument value.
 
     Returns:
-        The tag, unchanged; `Describer` does its own stripping.
+        The value, unchanged; the library does its own stripping.
 
     Raises:
-        argparse.ArgumentTypeError: If the tag is blank, which would otherwise
-            reach the server and come back as a puzzling 404.
+        argparse.ArgumentTypeError: If it is blank. A blank model tag would
+            reach the server and come back as a puzzling 404; a blank language
+            would ask the model to write in nothing at all.
     """
     if not text.strip():
-        raise argparse.ArgumentTypeError("model tag must not be blank")
+        raise argparse.ArgumentTypeError("must not be blank")
     return text
 
 
@@ -306,12 +369,12 @@ def _positive_int(text: str) -> int:
         The parsed count.
 
     Raises:
-        argparse.ArgumentTypeError: If it is not a whole number, or is below 1.
+        argparse.ArgumentTypeError: If it is not a plain whole number, or is
+            below 1.
     """
-    try:
-        value = int(text)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number") from exc
+    if not _INTEGER_RE.match(text):
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number")
+    value = int(text)
     if value < 1:
         raise argparse.ArgumentTypeError(f"must be at least 1, not {value}")
     return value
@@ -327,16 +390,14 @@ def _seconds(text: str) -> float:
         The parsed number of seconds.
 
     Raises:
-        argparse.ArgumentTypeError: If it is not a number, or is not positive
-            and finite — `inf` is a hang with extra steps, and `nan` loses
-            every comparison the socket layer would make against it.
+        argparse.ArgumentTypeError: If it is not a plain decimal number, or is
+            not positive and finite — "1e400" overflows to infinity, which is a
+            hang with extra steps, and the spellings of infinity and nan are
+            rejected outright as numbers of seconds.
     """
-    try:
-        value = float(text)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(
-            f"{text!r} is not a number of seconds"
-        ) from exc
+    if not _DECIMAL_RE.match(text):
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number of seconds")
+    value = float(text)
     if not math.isfinite(value) or value <= 0:
         raise argparse.ArgumentTypeError(
             f"must be a positive, finite number of seconds, not {text!r}"

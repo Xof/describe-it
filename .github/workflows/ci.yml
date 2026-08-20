@@ -69,6 +69,8 @@ jobs:
           ollama pull "$DESCRIBE_IT_MODEL"
 
       # -v so the log names each test: the value of a run against a real model
-      # is as much in what it printed as in whether it passed.
+      # is as much in what it printed as in whether it passed. -rs because
+      # these tests skip themselves when the server is not answering, and a
+      # silent skip reads exactly like a pass in the log.
       - name: Run the live tests
-        run: DESCRIBE_IT_INTEGRATION=1 uv run pytest -m integration -v
+        run: DESCRIBE_IT_INTEGRATION=1 uv run pytest -m integration -v -rs

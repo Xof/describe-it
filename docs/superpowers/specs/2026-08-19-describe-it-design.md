@@ -506,7 +506,24 @@ and the configured Ollama host answers `/api/version`.
   `--version` prints `describe-it <version>`. Pillow's
   `DecompressionBombError` is reported the same way even though it is not an
   `OSError`: it is raised by `Image.open`, before `prepare_image` could wrap
-  it, and it is a file the CLI cannot read like any other.
+  it, and it is a file the CLI cannot read like any other. Where Pillow's
+  message ends with the path it was given, the repeat is trimmed, since the
+  line already starts with it.
+- §2.8: the one-line-per-file contract needs three defences beyond collapsing
+  whitespace. A backslash, tab or newline in a *path* is escaped (`\\`, `\t`,
+  `\n`) in both the tab-separated column and the diagnostic, because POSIX
+  allows all three in a filename and an unescaped one forges a column or splits
+  a record. Pillow's `DecompressionBombWarning` — over the pixel limit but
+  under twice it, where the image still decodes — is suppressed rather than
+  shown or raised: the image is describable, so the run succeeds, and a Python
+  warning would put two more lines on stderr. Each description is flushed as it
+  is produced, so a reader on the far end of a pipe is not left in silence for
+  the length of a batch.
+- §2.8: a closed output pipe (`describe-it *.png | head`) exits 1 quietly. The
+  `BrokenPipeError` is caught in `main` and `sys.stdout` is redirected to
+  `/dev/null` first, per the recipe in the Python documentation, so that the
+  interpreter's own final flush cannot raise a second time and print
+  "Exception ignored".
 - §6.2: the live tests check `$DESCRIBE_IT_INTEGRATION` *before* probing
   `/api/version`, so collecting the module during a unit run opens no socket.
   The probe uses a proxy-free opener with a 2 s timeout, matching the client's
