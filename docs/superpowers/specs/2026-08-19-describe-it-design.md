@@ -480,3 +480,37 @@ and the configured Ollama host answers `/api/version`.
   along with `host`. `model` must not be blank after stripping (`ValueError`),
   a blank `$DESCRIBE_IT_MODEL` counts as unset exactly as a blank `$OLLAMA_HOST`
   does, and `max_words` must be an `int` and not a `bool` (`TypeError`).
+
+### Errata (2026-08-20, found during unit 3)
+
+- §2.8: every option value is validated by an argparse `type` function, so a
+  bad one is a usage message and exit status 2 rather than a traceback out of
+  `Describer` — `--max-words` and `--max-image-size` must be integers of at
+  least 1, `--timeout` a positive finite number, `--model` non-blank, and
+  `--host` something `normalise_host` accepts. `--model` and `--host` default
+  to `None` and are passed through as `None`, so `$DESCRIBE_IT_MODEL` and
+  `$OLLAMA_HOST` mean the same thing on the command line as in the library.
+- §2.8: `--max-image-size` takes a pixel count only; the library's `None`
+  ("send at full size") is not expressible on the command line. `keep_alive`
+  and `prompt` have no flags either — one describer is built per run, and both
+  are programmatic choices.
+- §2.8: a failure is reported as `describe-it: <path>: <reason>` on one line,
+  with internal whitespace collapsed, because a server's error body can carry
+  newlines and a multi-file run is read a line at a time. An `OSError` is
+  reported by its `strerror` where it has one (the filename is already in the
+  message); Pillow's `UnidentifiedImageError` has none and is reported whole.
+  `--version` prints `describe-it <version>`.
+- §6.2: the live tests check `$DESCRIBE_IT_INTEGRATION` *before* probing
+  `/api/version`, so collecting the module during a unit run opens no socket.
+  The probe uses a proxy-free opener with a 2 s timeout, matching the client's
+  posture (unit-2 errata) so that a machine-wide proxy cannot skip the tests on
+  a machine where the library works.
+- §6.2: run against Ollama 0.32.13 with `llava:7b` (this machine's Ollama
+  cannot load its own `qwen3.5:4b` blob). The word-budget test failed in one
+  run of three, and the French test in all three — `llava:7b` answers in
+  English whatever the prompt asks. Both are model behaviour; the assertions
+  are left at the strength stated above, and the job stays non-blocking.
+- §5: the distribution carries a `py.typed` marker, a `Repository` URL,
+  keywords and classifiers (Python 3.12–3.14, Multimedia :: Graphics,
+  Intended Audience :: Developers, Typing :: Typed). No license is declared, so
+  none is claimed in the metadata or the README.
