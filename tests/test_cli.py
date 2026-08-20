@@ -1,0 +1,349 @@
+"""Tests for `describe_it.cli`.
+
+The CLI is driven the way a shell drives it — `main(argv)`, output read off
+stdout and stderr — against the same fake Ollama the client and describer tests
+use, so a run here is the real pipeline minus the model. What is checked is the
+CLI's own contract: which stream each thing lands on, the exit status, that one
+bad file does not stop the rest, and that every option actually reaches the
+request.
+
+Every test runs with `$OLLAMA_HOST` and `$DESCRIBE_IT_MODEL` removed, so that a
+developer machine configured for a real Ollama cannot change what the suite
+does — or, worse, let a test pass by talking to a live server.
+"""
+
+import base64
+import importlib.metadata
+import inspect
+import io
+from pathlib import Path
+
+import pytest
+from PIL import Image, ImageFile
+
+from conftest import FakeOllama
+from describe_it import cli
+from describe_it.config import HOST_ENV_VAR, MODEL_ENV_VAR
+from describe_it.describer import Describer
+
+
+@pytest.fixture(autouse=True)
+def _hide_ambient_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove the machine's own Ollama configuration for the whole module."""
+    monkeypatch.delenv(HOST_ENV_VAR, raising=False)
+    monkeypatch.delenv(MODEL_ENV_VAR, raising=False)
+
+
+def _image_file(directory: Path, name: str = "image.png", size: int = 32) -> Path:
+    """Write a small PNG and return its path."""
+    path = directory / name
+    Image.new("RGB", (size, size * 3 // 4), (200, 30, 30)).save(path)
+    return path
+
+
+def _reply(content: str) -> dict[str, object]:
+    """Return an /api/chat body carrying one assistant message."""
+    return {"message": {"role": "assistant", "content": content}}
+
+
+def test_one_file_prints_the_description_alone(
+    server: FakeOllama, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    server.script_json("/api/chat", _reply("A red rectangle."))
+    path = _image_file(tmp_path)
+
+    status = cli.main(["--host", server.url, str(path)])
+
+    captured = capsys.readouterr()
+    assert status == 0
+    # No path prefix: the single-file case is meant to be pipeable as it is.
+    assert captured.out == "A red rectangle.\n"
+    assert captured.err == ""
+
+
+def test_several_files_are_prefixed_with_their_paths(
+    server: FakeOllama, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    server.script_json("/api/chat", _reply("A red rectangle."))
+    server.script_json("/api/chat", _reply("Another red rectangle."))
+    first = _image_file(tmp_path, "first.png")
+    second = _image_file(tmp_path, "second.png")
+
+    status = cli.main(["--host", server.url, str(first), str(second)])
+
+    captured = capsys.readouterr()
+    assert status == 0
+    assert captured.out == (
+        f"{first}\tA red rectangle.\n{second}\tAnother red rectangle.\n"
+    )
+
+
+def test_a_missing_file_is_reported_and_the_others_are_still_described(
+    server: FakeOllama, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    server.script_json("/api/chat", _reply("A red rectangle."))
+    missing = tmp_path / "missing.png"
+    present = _image_file(tmp_path)
+
+    # The missing file comes first, so that continuing past it is what the
+    # second line of output proves.
+    status = cli.main(["--host", server.url, str(missing), str(present)])
+
+    captured = capsys.readouterr()
+    assert status == 1
+    assert captured.out == f"{present}\tA red rectangle.\n"
+    assert captured.err == f"describe-it: {missing}: No such file or directory\n"
+
+
+def test_a_file_that_is_not_an_image_never_reaches_the_server(
+    server: FakeOllama, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_text("this is not a PNG")
+
+    status = cli.main(["--host", server.url, str(path)])
+
+    captured = capsys.readouterr()
+    assert status == 1
+    assert captured.out == ""
+    # Pillow's own error, which carries no errno to report in its place.
+    assert captured.err.startswith(f"describe-it: {path}: cannot identify image file")
+    assert server.requests == []
+
+
+def test_a_server_error_is_one_line_on_stderr(
+    server: FakeOllama, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A multi-line body, because an error page from a misconfigured host is
+    # exactly what arrives here and the output has to stay one line per file.
+    server.script("/api/chat", status=500, body=b"failed to load model\nout of memory")
+    path = _image_file(tmp_path)
+
+    status = cli.main(["--host", server.url, str(path)])
+
+    captured = capsys.readouterr()
+    assert status == 1
+    assert captured.out == ""
+    assert captured.err.count("\n") == 1
+    assert captured.err.startswith(f"describe-it: {path}: ")
+    assert "HTTP 500" in captured.err
+    assert "failed to load model out of memory" in captured.err
+
+
+def test_the_model_and_host_options_reach_the_request(
+    server: FakeOllama, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    server.script_json("/api/chat", _reply("A red rectangle."))
+    path = _image_file(tmp_path)
+
+    status = cli.main(["--model", "llava:7b", "--host", server.url, str(path)])
+
+    assert status == 0
+    assert capsys.readouterr().out == "A red rectangle.\n"
+    # The host reached the request by definition: this fake server recorded it.
+    request = server.requests[0]
+    assert request.path == "/api/chat"
+    assert request.json_body["model"] == "llava:7b"
+
+
+def test_the_environment_supplies_the_model_and_the_host(
+    server: FakeOllama,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The CLI passes None through for both, so the environment stays as
+    # meaningful for `describe-it` as it is for a caller of the library.
+    monkeypatch.setenv(HOST_ENV_VAR, server.url)
+    monkeypatch.setenv(MODEL_ENV_VAR, "gemma4:e4b")
+    server.script_json("/api/chat", _reply("A red rectangle."))
+
+    status = cli.main([str(_image_file(tmp_path))])
+
+    assert status == 0
+    assert capsys.readouterr().out == "A red rectangle.\n"
+    assert server.requests[0].json_body["model"] == "gemma4:e4b"
+
+
+def test_the_prompt_options_reach_the_request(
+    server: FakeOllama, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    server.script_json("/api/chat", _reply("Un rectangle rouge."))
+    path = _image_file(tmp_path, size=64)
+
+    status = cli.main(
+        [
+            "--host",
+            server.url,
+            "--language",
+            "French",
+            "--max-words",
+            "8",
+            "--context",
+            "gallery thumbnail",
+            "--max-image-size",
+            "16",
+            str(path),
+        ]
+    )
+
+    assert status == 0
+    assert capsys.readouterr().out == "Un rectangle rouge.\n"
+    body = server.requests[0].json_body
+    assert body["options"] == {"temperature": 0.2, "num_predict": 8 * 4 + 32}
+    message = body["messages"][0]
+    assert "at most 8 words" in message["content"]
+    assert "write in French" in message["content"]
+    assert "gallery thumbnail" in message["content"]
+    sent = Image.open(io.BytesIO(base64.b64decode(message["images"][0])))
+    assert sent.size == (16, 12)
+
+
+def test_the_timeout_option_reaches_the_transport(
+    server: FakeOllama, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Asserted through a server that answers too slowly rather than by reading
+    # the number back off the describer: the number only matters because a
+    # socket eventually acts on it.
+    server.script_json("/api/chat", _reply("A red rectangle."), delay=0.5)
+    path = _image_file(tmp_path)
+
+    status = cli.main(["--host", server.url, "--timeout", "0.05", str(path)])
+
+    captured = capsys.readouterr()
+    assert status == 1
+    assert captured.out == ""
+    assert "timed out after 0.05s" in captured.err
+
+
+def test_every_file_is_closed_before_the_run_ends(
+    server: FakeOllama,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A run over a directory of images would run the process out of file
+    # descriptors if the CLI leaked one per image, and nothing else in the
+    # suite would notice: leaked handles are only fatal at scale.
+    opened: list[ImageFile.ImageFile] = []
+    real_open = Image.open
+
+    def recording_open(path: Path) -> ImageFile.ImageFile:
+        image = real_open(path)
+        opened.append(image)
+        return image
+
+    monkeypatch.setattr(Image, "open", recording_open)
+    server.script_json("/api/chat", _reply("A red rectangle."))
+
+    assert cli.main(["--host", server.url, str(_image_file(tmp_path))]) == 0
+
+    capsys.readouterr()
+    assert [image.fp for image in opened] == [None]
+
+
+def test_the_version_option_prints_the_package_version(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--version"])
+
+    assert exit_info.value.code == 0
+    assert importlib.metadata.version("describe-it") in capsys.readouterr().out
+
+
+def test_the_parser_defaults_mirror_the_library_defaults() -> None:
+    # The CLI has to write its defaults out as literals for the help text; this
+    # is what keeps the copy honest when a library default changes.
+    defaults = cli._build_parser().parse_args(["image.png"])
+    signature = inspect.signature(Describer.__init__)
+
+    for name in ("timeout", "language", "max_words", "max_image_size"):
+        assert getattr(defaults, name) == signature.parameters[name].default
+    # Not copied but deferred: None is what makes the describer read the
+    # environment, so the CLI and a plain `describe()` call resolve alike.
+    assert defaults.model is None
+    assert defaults.host is None
+    assert defaults.context is None
+    assert defaults.files == [Path("image.png")]
+
+
+@pytest.mark.parametrize("option", ["--max-words", "--max-image-size"])
+def test_a_count_below_one_is_a_usage_error(
+    option: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main([option, "0", str(_image_file(tmp_path))])
+
+    assert exit_info.value.code == 2
+    assert "at least 1" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("option", ["--max-words", "--max-image-size"])
+def test_a_count_that_is_not_a_number_is_a_usage_error(
+    option: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main([option, "lots", str(_image_file(tmp_path))])
+
+    assert exit_info.value.code == 2
+    assert "not a whole number" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "inf", "nan"])
+def test_a_timeout_that_is_not_positive_and_finite_is_a_usage_error(
+    value: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--timeout", value, str(_image_file(tmp_path))])
+
+    assert exit_info.value.code == 2
+    assert "positive, finite" in capsys.readouterr().err
+
+
+def test_a_timeout_that_is_not_a_number_is_a_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--timeout", "soon", str(_image_file(tmp_path))])
+
+    assert exit_info.value.code == 2
+    assert "not a number of seconds" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("ftp://localhost:11434", "must use http or https"),
+        ("http://localhost:11434/?", "query string or fragment"),
+        ("", "no hostname"),
+    ],
+)
+def test_an_unusable_host_is_a_usage_error(
+    value: str, expected: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Validated in the parser rather than left to the client, so a mistyped
+    # host is a usage message rather than a traceback out of a constructor.
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--host", value, str(_image_file(tmp_path))])
+
+    assert exit_info.value.code == 2
+    assert expected in capsys.readouterr().err
+
+
+def test_a_blank_model_is_a_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--model", "   ", str(_image_file(tmp_path))])
+
+    assert exit_info.value.code == 2
+    assert "must not be blank" in capsys.readouterr().err
+
+
+def test_at_least_one_file_is_required(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main([])
+
+    assert exit_info.value.code == 2
+    assert "FILE" in capsys.readouterr().err
