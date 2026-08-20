@@ -387,23 +387,37 @@ and the configured Ollama host answers `/api/version`.
   wide modes (`I`, `I;16`, `F`) are normalised against the image's own
   min/max before conversion to 8-bit (a constant image maps to black), because
   `Image.convert("RGB")` clips 16-bit data to white.
-- EXIF orientation is honoured: `ImageOps.exif_transpose` runs before mode
-  conversion (§2.4 step 0). Output carries no EXIF.
+- EXIF orientation is honoured: `ImageOps.exif_transpose` runs as a new step
+  before §2.4 step 1, and only when the image carries an orientation other
+  than 1. Output carries no EXIF.
 - The refusal regex (§2.6 step 5) also accepts U+2018/U+2019 apostrophes and
   `i am sorry`.
 - Wrapping quotes/emphasis are stripped only when balanced — the interior must
   not contain the closing character again — so quoted text at both ends of a
-  description survives.
-- Code-fence info strings, unclosed `<think>` blocks (stripped to end of text),
-  BOM and zero-width characters are all removed during cleaning.
+  description survives. An apostrophe between two word characters ("a child's
+  drawing") is punctuation rather than a closing quote and does not count, so
+  single-quoted text is still unwrapped.
+- Code-fence info strings and unclosed `<think>` blocks (stripped to end of
+  text) are removed during cleaning. The BOM and zero-width characters are
+  removed at the leading and trailing edges only — of the text and of each
+  decoration layer — because interior ZWJ/ZWNJ/ZWSP are orthographically
+  required by several scripts (Persian, Urdu, Hindi, Sinhala, Malayalam,
+  Thai, Khmer) and hold emoji sequences together.
 - `max_image_size` must be an `int` (not `bool`); other types raise
   `TypeError`.
 - `prompt=""` raises `ValueError`.
-- Images whose `info["transparency"]` is set are flattened onto white
-  regardless of mode.
-- Non-finite samples in `F` images: the own-extrema normalisation is skipped
-  and Pillow's default conversion is used.
-- `I;16B` / `I;16L` / `I;16N` are normalised with `convert("I")` before
-  rescaling, because `getextrema()` and `point()` reject those modes outright.
-  `I;16N` still loses its low byte: Pillow's own unpacker for that mode is
-  8-bit, so no rescale can recover it.
+- Images whose `info["transparency"]` is set are flattened onto white in every
+  mode except the wide ones: a colour key names a raw sample value, and the
+  wide-mode rescale moves every sample, so a key on an `I`/`I;16*`/`F` image is
+  ignored and the image is described opaque. A key Pillow cannot apply (a
+  string, `None`, a mismatched tuple) is likewise ignored rather than fatal.
+- Non-finite samples in `F` images: if an extremum is `inf`, the own-extrema
+  normalisation is skipped and Pillow's default conversion is used. `nan`
+  samples do not reach that guard — `getextrema()` ignores them — so those
+  images normalise as usual and the `nan` pixels themselves come out black.
+- `I;16B` / `I;16L` are normalised with `convert("I")` before rescaling,
+  because `getextrema()` and `point()` reject those modes outright. `I;16N`
+  cannot be converted — Pillow routes it through an 8-bit unpacker and clamps
+  every sample to 255 — so its bytes are reinterpreted as the explicit
+  byte-order mode this machine uses (`sys.byteorder`) and it keeps full
+  precision like the other two.
