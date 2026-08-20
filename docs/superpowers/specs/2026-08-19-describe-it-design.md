@@ -387,3 +387,23 @@ and the configured Ollama host answers `/api/version`.
   wide modes (`I`, `I;16`, `F`) are normalised against the image's own
   min/max before conversion to 8-bit (a constant image maps to black), because
   `Image.convert("RGB")` clips 16-bit data to white.
+- EXIF orientation is honoured: `ImageOps.exif_transpose` runs before mode
+  conversion (§2.4 step 0). Output carries no EXIF.
+- The refusal regex (§2.6 step 5) also accepts U+2018/U+2019 apostrophes and
+  `i am sorry`.
+- Wrapping quotes/emphasis are stripped only when balanced — the interior must
+  not contain the closing character again — so quoted text at both ends of a
+  description survives.
+- Code-fence info strings, unclosed `<think>` blocks (stripped to end of text),
+  BOM and zero-width characters are all removed during cleaning.
+- `max_image_size` must be an `int` (not `bool`); other types raise
+  `TypeError`.
+- `prompt=""` raises `ValueError`.
+- Images whose `info["transparency"]` is set are flattened onto white
+  regardless of mode.
+- Non-finite samples in `F` images: the own-extrema normalisation is skipped
+  and Pillow's default conversion is used.
+- `I;16B` / `I;16L` / `I;16N` are normalised with `convert("I")` before
+  rescaling, because `getextrema()` and `point()` reject those modes outright.
+  `I;16N` still loses its low byte: Pillow's own unpacker for that mode is
+  8-bit, so no rescale can recover it.
