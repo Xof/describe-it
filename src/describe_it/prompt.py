@@ -51,14 +51,16 @@ _LABEL_RE = re.compile(
 
 # Info strings worth recognising on a single-line fence, where there is no
 # newline to mark where the info string ends. Anything goes before a newline;
-# without one, only these, so that "```a cat.```" keeps its first word.
+# without one, only these, so that "```a cat.```" keeps its first word. Matched
+# case-sensitively — info strings are written lowercase by convention, and
+# "```Text on a wall.```" is a sentence, not a fence with an info string.
 _FENCE_INFO = "text|markdown|md|json|plaintext|plain"
 
 # A fenced code block. The info string ("```text") runs to the first newline
 # and would otherwise be left at the head of the alt text.
 _FENCE_RE = re.compile(
     rf"^```(?:[^\n]*\n|(?:{_FENCE_INFO})[ \t]+)?(?P<body>.*?)\n?```\Z",
-    re.DOTALL | re.IGNORECASE,
+    re.DOTALL,
 )
 
 # Opening/closing pairs a model wraps its answer in. Longer markers first so

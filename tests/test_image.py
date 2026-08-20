@@ -7,9 +7,10 @@ taken well inside a solid block so chroma subsampling cannot reach it.
 """
 
 import io
+import math
 import struct
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from hypothesis import given, settings
@@ -332,6 +333,53 @@ def test_bogus_transparency_key_is_ignored() -> None:
 
     _assert_close(_pixel(decoded, (16, 16)), _RED)
     _assert_close(_pixel(decoded, (48, 16)), _BLUE)
+
+
+@pytest.mark.parametrize(
+    ("mode", "bogus"),
+    [
+        ("L", "x"),
+        ("L", 1.5),
+        ("P", "x"),
+        ("P", 1.5),
+        ("RGB", None),
+    ],
+)
+def test_bogus_transparency_key_never_costs_the_description(
+    mode: str, bogus: object
+) -> None:
+    # PIL consults the key on the plain L and P conversions too, so dropping
+    # the flatten route is not enough on its own.
+    image = Image.new(mode, (48, 32), _MODE_FILLS[mode])
+    image.info["transparency"] = bogus
+
+    decoded = _decode(prepare_image(image, max_size=None))
+
+    assert decoded.size == (48, 32)
+    # The key is dropped from a copy; the caller's image keeps whatever it had.
+    assert image.info["transparency"] == bogus
+
+
+def test_nan_at_the_first_pixel_does_not_black_out_the_image() -> None:
+    # PIL seeds its extrema scan with pixel (0, 0), so a nan there comes back
+    # as a nan range for the whole image; rescanning finds the real one.
+    image = _banded("F", (0.2, 0.8))
+    image.putpixel((0, 0), float("nan"))
+    assert math.isnan(cast("tuple[float, float]", image.getextrema())[0])
+
+    decoded = _decode(prepare_image(image, max_size=None))
+
+    dark, light = (_pixel(decoded, (x, 16))[0] for x in (16, 48))
+    assert dark < 15
+    assert light > 240
+
+
+def test_all_nan_float_image_comes_out_black() -> None:
+    image = Image.new("F", (48, 32), float("nan"))
+
+    decoded = _decode(prepare_image(image, max_size=None))
+
+    _assert_close(_pixel(decoded, (24, 16)), (0, 0, 0))
 
 
 def test_wide_mode_ignores_a_colour_key() -> None:

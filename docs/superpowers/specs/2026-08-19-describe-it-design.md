@@ -410,11 +410,17 @@ and the configured Ollama host answers `/api/version`.
   mode except the wide ones: a colour key names a raw sample value, and the
   wide-mode rescale moves every sample, so a key on an `I`/`I;16*`/`F` image is
   ignored and the image is described opaque. A key Pillow cannot apply (a
-  string, `None`, a mismatched tuple) is likewise ignored rather than fatal.
-- Non-finite samples in `F` images: if an extremum is `inf`, the own-extrema
-  normalisation is skipped and Pillow's default conversion is used. `nan`
-  samples do not reach that guard — `getextrema()` ignores them — so those
-  images normalise as usual and the `nan` pixels themselves come out black.
+  string, `None`, a mismatched tuple) is dropped — from a copy, so the caller's
+  image keeps it — and the image is described opaque. The key has to be dropped
+  before the plain `convert("RGB")` as well, because Pillow consults it again
+  on the `L` and `P` paths.
+- Non-finite samples in `F` images: normalisation is skipped, in favour of
+  Pillow's clamping conversion, only when an extremum is `inf`. `nan` is
+  handled rather than skipped: Pillow seeds its extrema scan with pixel (0, 0),
+  so a `nan` there reports a `nan` range for the whole image and the finite
+  range is rescanned from the raw samples (an image that is entirely `nan`
+  comes out black). A `nan` anywhere else never reaches the guard, because
+  Pillow's extrema skip it. `nan` pixels themselves always come out black.
 - `I;16B` / `I;16L` are normalised with `convert("I")` before rescaling,
   because `getextrema()` and `point()` reject those modes outright. `I;16N`
   cannot be converted — Pillow routes it through an 8-bit unpacker and clamps

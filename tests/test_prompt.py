@@ -97,6 +97,7 @@ _CLEANING_CASES = [
     ("```text\nA grey cat.\n```", "A grey cat."),
     ("```json\nA grey cat.\n```", "A grey cat."),
     ("```text A grey cat.```", "A grey cat."),
+    ("```Text on a wall.```", "Text on a wall."),
     ("```md A grey cat.```", "A grey cat."),
     ("**A grey cat.**", "A grey cat."),
     ("*A grey cat.*", "A grey cat."),

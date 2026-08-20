@@ -7,7 +7,7 @@ wide (16/32-bit integer and float) modes whose samples do not fit in a byte. It
 is pure — no network, no filesystem, no mutation of the caller's image.
 """
 
-import contextlib
+import array
 import io
 import math
 import sys
@@ -171,13 +171,31 @@ def _to_rgb(image: Image.Image, *, owned: bool) -> Image.Image:
     if "transparency" in image.info or mode in _ALPHA_MODES:
         # The key is whatever the encoder wrote there. PIL raises TypeError on
         # a value it cannot use (a string, None, a tuple of the wrong length),
-        # and a broken hint is no reason to refuse an otherwise fine image:
-        # fall through and describe it opaque.
-        with contextlib.suppress(TypeError, ValueError):
+        # and a broken hint is no reason to refuse an otherwise fine image.
+        try:
             return _flatten_alpha(_to_rgba(image))
+        except (TypeError, ValueError):
+            # The key has to go before the plain conversion as well: PIL
+            # consults it again on the L and P paths and fails the same way.
+            return _without_transparency(image).convert("RGB")
     if mode == "RGB":
         return image if owned else image.copy()
     return image.convert("RGB")
+
+
+def _without_transparency(image: Image.Image) -> Image.Image:
+    """Return a copy of the image with its transparency key removed.
+
+    Args:
+        image: The image to strip; it and its `info` are left untouched, since
+            `copy()` gives the copy its own `info` dict.
+
+    Returns:
+        A copy PIL will convert without consulting the key.
+    """
+    stripped = image.copy()
+    stripped.info.pop("transparency", None)
+    return stripped
 
 
 def _to_rgba(image: Image.Image) -> Image.Image:
@@ -233,14 +251,22 @@ def _rescale_to_grey(image: Image.Image) -> Image.Image:
     # Wide modes are single-band, so getextrema() gives a plain (min, max)
     # pair; the declared union covers the multi-band case this never sees.
     low, high = cast("tuple[float, float]", image.getextrema())
+    if math.isnan(low) and math.isnan(high):
+        # PIL seeds its extrema scan with pixel (0, 0) and nan loses every
+        # comparison after that, so a nan in that one corner poisons the range
+        # for the whole image (a nan anywhere else is simply skipped). Rescan
+        # for the real range; only an image that hit this case pays for it.
+        rescanned = _finite_extrema(image)
+        if rescanned is None:
+            # Nothing but nan: there is no range to preserve.
+            return Image.new("L", image.size, 0)
+        low, high = rescanned
     if not (math.isfinite(low) and math.isfinite(high)):
-        # An F image with an infinite sample — a depth map with holes, say —
-        # has no usable range: scaling against inf would map every finite
-        # sample to black. PIL's own conversion clamps to 0..255 instead, which
-        # keeps the finite part visible. Known limitation: one infinite sample
-        # costs the image its dynamic-range normalisation. (nan never gets
-        # here: getextrema() ignores nan, so the range stays finite and the
-        # nan pixels come out black on their own.)
+        # An infinite sample — a depth map with holes, say — leaves no usable
+        # range: scaling against inf would map every finite sample to black.
+        # PIL's own conversion clamps to 0..255 instead, which keeps the finite
+        # part visible. Known limitation: one infinite sample costs the image
+        # its dynamic-range normalisation.
         return image.convert("L")
     if high <= low:
         # Constant image: there is no contrast to preserve and the scale factor
@@ -252,6 +278,26 @@ def _rescale_to_grey(image: Image.Image) -> Image.Image:
     scale = 255.0 / (high - low)
     offset = -low * scale
     return image.point(lambda value: value * scale + offset).convert("L")
+
+
+def _finite_extrema(image: Image.Image) -> tuple[float, float] | None:
+    """Return the smallest and largest finite samples, ignoring nan.
+
+    Only reached for an `F` image whose pixel (0, 0) is nan, which is why it
+    can assume the 32-bit-float raw layout and why walking every sample in
+    Python is acceptable: the ordinary path never comes here.
+
+    Args:
+        image: An `F`-mode image.
+
+    Returns:
+        The `(min, max)` of the finite samples, or None if there are none.
+    """
+    samples = array.array("f", image.tobytes())
+    low = min(filter(math.isfinite, samples), default=None)
+    if low is None:
+        return None
+    return low, max(filter(math.isfinite, samples))
 
 
 def _flatten_alpha(rgba: Image.Image) -> Image.Image:
