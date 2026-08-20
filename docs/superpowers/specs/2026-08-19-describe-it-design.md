@@ -483,13 +483,17 @@ and the configured Ollama host answers `/api/version`.
 
 ### Errata (2026-08-20, found during unit 3)
 
-- §2.8: every option value is validated by an argparse `type` function, so a
-  bad one is a usage message and exit status 2 rather than a traceback out of
-  `Describer` — `--max-words` and `--max-image-size` must be integers of at
-  least 1, `--timeout` a positive finite number, `--model` non-blank, and
-  `--host` something `normalise_host` accepts. `--model` and `--host` default
-  to `None` and are passed through as `None`, so `$DESCRIBE_IT_MODEL` and
-  `$OLLAMA_HOST` mean the same thing on the command line as in the library.
+- §2.8: every option value that the library can reject is validated by an
+  argparse `type` function, so a bad one is a usage message and exit status 2
+  rather than a traceback out of `Describer` — `--max-words` and
+  `--max-image-size` must be integers of at least 1, `--timeout` a positive
+  finite number, `--model` non-blank, and `--host` something `normalise_host`
+  accepts. (`--language` and `--context` are free text, which the library does
+  not constrain either.) `--model` and `--host` default to `None` and are
+  passed through as `None`, so `$DESCRIBE_IT_MODEL` and `$OLLAMA_HOST` mean the
+  same thing on the command line as in the library — and because those two
+  reach `Describer` without passing through a `type` function, `main` turns the
+  `ValueError` they can raise into the same usage error, exit 2 as well.
 - §2.8: `--max-image-size` takes a pixel count only; the library's `None`
   ("send at full size") is not expressible on the command line. `keep_alive`
   and `prompt` have no flags either — one describer is built per run, and both
@@ -508,11 +512,18 @@ and the configured Ollama host answers `/api/version`.
   The probe uses a proxy-free opener with a 2 s timeout, matching the client's
   posture (unit-2 errata) so that a machine-wide proxy cannot skip the tests on
   a machine where the library works.
-- §6.2: run against Ollama 0.32.13 with `llava:7b` (this machine's Ollama
-  cannot load its own `qwen3.5:4b` blob). The word-budget test failed in one
-  run of three, and the French test in all three — `llava:7b` answers in
-  English whatever the prompt asks. Both are model behaviour; the assertions
-  are left at the strength stated above, and the job stays non-blocking.
+- §6.2: run four times against Ollama 0.32.13 with `llava:7b` (this machine's
+  Ollama cannot load its own `qwen3.5:4b` blob). The first test's
+  ≤ `max_words + 10` assertion failed once in four; the word-budget *ordering*
+  test and the missing-model test passed every time; the French test failed
+  every time — `llava:7b` answers in English whatever the prompt asks. Both
+  failures are model behaviour; the assertions are left at the strength stated
+  above, and the job stays non-blocking.
+- §6.2: the synthetic image's text is drawn with `ImageFont.load_default(size=)`,
+  which needs Pillow ≥ 10.1, while the library's own floor stays at the `>=10`
+  of §5 — the smaller font Pillow 10.0 would give is illegible to a vision
+  model at this resolution, and the requirement belongs to the opt-in tests
+  rather than to the package.
 - §5: the distribution carries a `py.typed` marker, a `Repository` URL,
   keywords and classifiers (Python 3.12–3.14, Multimedia :: Graphics,
   Intended Audience :: Developers, Typing :: Typed). No license is declared, so

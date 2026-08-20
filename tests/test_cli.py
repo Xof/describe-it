@@ -13,9 +13,11 @@ does — or, worse, let a test pass by talking to a live server.
 """
 
 import base64
+import errno
 import importlib.metadata
 import inspect
 import io
+import os
 from pathlib import Path
 
 import pytest
@@ -38,6 +40,18 @@ def _image_file(directory: Path, name: str = "image.png", size: int = 32) -> Pat
     """Write a small PNG and return its path."""
     path = directory / name
     Image.new("RGB", (size, size * 3 // 4), (200, 30, 30)).save(path)
+    return path
+
+
+def _animation_file(directory: Path, name: str = "frames.gif") -> Path:
+    """Write a small multi-frame GIF and return its path.
+
+    Multi-frame because Pillow keeps the file open for a format it may have to
+    seek in, which is what makes a leaked handle observable.
+    """
+    path = directory / name
+    frames = [Image.new("RGB", (32, 24), (60 * step, 30, 30)) for step in range(3)]
+    frames[0].save(path, save_all=True, append_images=frames[1:])
     return path
 
 
@@ -92,7 +106,9 @@ def test_a_missing_file_is_reported_and_the_others_are_still_described(
     captured = capsys.readouterr()
     assert status == 1
     assert captured.out == f"{present}\tA red rectangle.\n"
-    assert captured.err == f"describe-it: {missing}: No such file or directory\n"
+    # os.strerror rather than the English text: the C library localises it.
+    reason = os.strerror(errno.ENOENT)
+    assert captured.err == f"describe-it: {missing}: {reason}\n"
 
 
 def test_a_file_that_is_not_an_image_never_reaches_the_server(
@@ -237,30 +253,86 @@ def test_the_timeout_option_reaches_the_transport(
     assert "timed out after 0.05s" in captured.err
 
 
-def test_every_file_is_closed_before_the_run_ends(
+def test_every_file_handle_is_released_before_the_run_ends(
     server: FakeOllama,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # A run over a directory of images would run the process out of file
-    # descriptors if the CLI leaked one per image, and nothing else in the
-    # suite would notice: leaked handles are only fatal at scale.
-    opened: list[ImageFile.ImageFile] = []
+    # A run over a directory of images would exhaust the process's descriptors
+    # if the CLI leaked one per image, and nothing else in the suite would
+    # notice: leaked handles are only fatal at scale.
+    #
+    # Two details make this test able to fail. It uses a multi-frame GIF,
+    # because Pillow releases the handle by itself for a single-frame PNG and
+    # keeps it for a format it may have to seek in; and it asserts on the
+    # underlying file object, captured at open time, because `image.fp` is set
+    # to None by `load()` whether or not the file was ever closed.
+    handles: list[object] = []
     real_open = Image.open
 
     def recording_open(path: Path) -> ImageFile.ImageFile:
         image = real_open(path)
-        opened.append(image)
+        # Private, and deliberately so: it is the only reference that survives
+        # the close and still reports whether the descriptor was released.
+        handles.append(image._fp)
         return image
 
     monkeypatch.setattr(Image, "open", recording_open)
-    server.script_json("/api/chat", _reply("A red rectangle."))
+    server.script_json("/api/chat", _reply("Three red frames."))
 
-    assert cli.main(["--host", server.url, str(_image_file(tmp_path))]) == 0
+    assert cli.main(["--host", server.url, str(_animation_file(tmp_path))]) == 0
 
     capsys.readouterr()
-    assert [image.fp for image in opened] == [None]
+    assert handles, "Image.open was never called"
+    for handle in handles:
+        assert isinstance(handle, io.IOBase)
+        assert handle.closed
+
+
+def test_one_describer_serves_the_whole_run(
+    server: FakeOllama,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Ollama keeps a model resident between requests; a describer per file
+    # would throw that away, and every other assertion in this file would still
+    # pass. The recorder spells out what the CLI passes, so a new option that
+    # is parsed but never forwarded fails here too.
+    built: list[Describer] = []
+
+    def recording_describer(
+        *,
+        model: str | None,
+        host: str | None,
+        timeout: float,
+        language: str,
+        max_words: int,
+        max_image_size: int | None,
+    ) -> Describer:
+        describer = Describer(
+            model=model,
+            host=host,
+            timeout=timeout,
+            language=language,
+            max_words=max_words,
+            max_image_size=max_image_size,
+        )
+        built.append(describer)
+        return describer
+
+    monkeypatch.setattr(cli, "Describer", recording_describer)
+    server.script_json("/api/chat", _reply("A red rectangle."))
+    server.script_json("/api/chat", _reply("Another red rectangle."))
+    first = _image_file(tmp_path, "first.png")
+    second = _image_file(tmp_path, "second.png")
+
+    assert cli.main(["--host", server.url, str(first), str(second)]) == 0
+
+    capsys.readouterr()
+    assert len(built) == 1
+    assert len(server.requests) == 2
 
 
 def test_the_version_option_prints_the_package_version(
@@ -270,7 +342,10 @@ def test_the_version_option_prints_the_package_version(
         cli.main(["--version"])
 
     assert exit_info.value.code == 0
-    assert importlib.metadata.version("describe-it") in capsys.readouterr().out
+    version = importlib.metadata.version("describe-it")
+    # The exact line, not just the number: the program has to name itself, or
+    # a version scraped from a pipeline says nothing about what produced it.
+    assert capsys.readouterr().out == f"describe-it {version}\n"
 
 
 def test_the_parser_defaults_mirror_the_library_defaults() -> None:
@@ -350,6 +425,21 @@ def test_an_unusable_host_is_a_usage_error(
 
     assert exit_info.value.code == 2
     assert expected in capsys.readouterr().err
+
+
+def test_an_unusable_host_in_the_environment_is_a_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # $OLLAMA_HOST does not pass through a `type` function, so without the
+    # guard in main() a misconfigured machine gets a traceback rather than the
+    # usage message a mistyped --host produces.
+    monkeypatch.setenv(HOST_ENV_VAR, "ftp://nowhere:1")
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main([str(_image_file(tmp_path))])
+
+    assert exit_info.value.code == 2
+    assert "must use http or https" in capsys.readouterr().err
 
 
 def test_a_blank_model_is_a_usage_error(

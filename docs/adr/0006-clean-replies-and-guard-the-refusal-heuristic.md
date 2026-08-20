@@ -33,7 +33,8 @@ An empty result is a `DescriptionError`.
 
 A refusal is detected by a **guarded, start-anchored** heuristic: a refusal
 phrase (`i'm sorry`, `i am sorry`, `i cannot`, `i can't`, `i am unable`,
-`i apologise/apologize`, `as an ai`, with straight or typographic apostrophes)
+`i'm unable`, `i apologise/apologize`, `as an ai`, with straight or
+typographic apostrophes)
 at the very start of the *cleaned* text, **and** either the text is under 200
 characters **or** it has no `.` before index 60. That raises
 `DescriptionRefusedError`, which carries the cleaned text on `.response`.

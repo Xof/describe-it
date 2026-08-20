@@ -67,11 +67,11 @@ Two suites with different jobs:
 
 ## Addendum (2026-08-20)
 
-First live run, on Ollama 0.32.13 with `llava:7b` (see ADR 0004's addendum for
-why not the default model): the missing-model test and the word-budget
-ordering test passed in all three runs; the ≤ `max_words + 10` assertion
-failed in one run of three (56 and 78 words against a budget of 30); the
-French test failed in all three — `llava:7b` answers in English whatever the
-prompt asks for. Both failures are model behaviour, not library behaviour, and
-are exactly the reason this job does not gate a merge. The assertions were
+First live runs — four of them, on Ollama 0.32.13 with `llava:7b` (see ADR
+0004's addendum for why not the default model). The missing-model test and the
+word-budget *ordering* test passed in all four. The first test's
+≤ `max_words + 10` assertion failed once in four (78 words against a budget of
+30). The French test failed in all four: `llava:7b` answers in English whatever
+the prompt asks for. Both failures are model behaviour, not library behaviour,
+and are exactly the reason this job does not gate a merge. The assertions were
 left at the strength the specification states.

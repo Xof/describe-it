@@ -46,10 +46,11 @@ _MAX_WORDS = 30
 # that may be a laptop or a shared CI runner.
 _TIMEOUT = 300.0
 
-# A handful of very common French function words. Any one of them is enough to
-# tell "this is French" from "this is English", which is all the language
-# option claims to do.
-_FRENCH_WORDS = frozenset({"le", "la", "les", "un", "une", "des", "sur", "avec"})
+# The handful of common French function words the design specification names,
+# and no more: widening the set would weaken an assertion the specification
+# fixed. Any one of them tells "this is French" from "this is English", which
+# is all the language option claims to do.
+_FRENCH_WORDS = frozenset({"le", "la", "un", "une", "des", "sur"})
 
 # Punctuation a model wraps around words, stripped before the language check.
 _PUNCTUATION = ".,;:!?\"'()«»“”‘’"
@@ -67,14 +68,19 @@ def _unavailable() -> str:
     if os.environ.get(_ENABLE_ENV_VAR) != "1":
         return f"set {_ENABLE_ENV_VAR}=1 to run the live tests"
     host = default_host()
+    try:
+        url = f"{normalise_host(host)}/api/version"
+    except ValueError as exc:
+        # A malformed $OLLAMA_HOST is a reason to skip, not a collection error:
+        # this runs at import, where an exception takes the whole session down
+        # rather than reporting one unusable module.
+        return f"unusable host {host!r}: {exc}"
     # No proxy handler, matching the client: Ollama is a local service, and a
     # machine-wide proxy that captured the probe would skip the tests on a
     # machine where the library itself works perfectly well.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with opener.open(
-            f"{normalise_host(host)}/api/version", timeout=_PROBE_TIMEOUT
-        ) as response:
+        with opener.open(url, timeout=_PROBE_TIMEOUT) as response:
             response.read()
     except (OSError, HTTPException) as exc:
         return f"no Ollama server answering at {host}: {exc}"

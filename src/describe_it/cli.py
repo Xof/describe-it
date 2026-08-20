@@ -47,19 +47,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     Raises:
         SystemExit: For `--help`, `--version` and usage errors, which argparse
             reports and exits on itself, with status 0, 0 and 2 respectively.
+            An unusable `$OLLAMA_HOST` or `$DESCRIBE_IT_MODEL` is reported the
+            same way as a bad flag, and exits 2 as well.
     """
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
     # One describer for the whole run: it owns the transport, and Ollama keeps
     # a model resident between requests, so building one per file would risk
     # paying for a model load per image.
-    describer = Describer(
-        model=args.model,
-        host=args.host,
-        timeout=args.timeout,
-        language=args.language,
-        max_words=args.max_words,
-        max_image_size=args.max_image_size,
-    )
+    try:
+        describer = Describer(
+            model=args.model,
+            host=args.host,
+            timeout=args.timeout,
+            language=args.language,
+            max_words=args.max_words,
+            max_image_size=args.max_image_size,
+        )
+    except ValueError as exc:
+        # The flags are validated by their `type` functions, but $OLLAMA_HOST
+        # and $DESCRIBE_IT_MODEL reach the describer without passing through
+        # one. A misconfigured environment is still a configuration mistake and
+        # deserves the same usage message, not a traceback.
+        parser.error(str(exc))
     return describe_files(
         describer,
         args.files,
@@ -107,6 +117,10 @@ def describe_files(
         # one-line report as for any other file that could not be read.
         except (OSError, Image.DecompressionBombError, DescribeItError) as exc:
             failed = True
+            # stderr is unbuffered and a redirected stdout is not, so without
+            # this the diagnostics of a redirected run all arrive before the
+            # descriptions they interleave with.
+            stdout.flush()
             print(f"describe-it: {path}: {_reason(exc)}", file=stderr)
             continue
         print(f"{path}\t{description}" if show_path else description, file=stdout)

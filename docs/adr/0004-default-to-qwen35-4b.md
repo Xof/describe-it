@@ -24,8 +24,11 @@ the weights.
 
 `DEFAULT_MODEL = "qwen3.5:4b"` (Alibaba, roughly 3 GB, vision plus thinking,
 with thinking disabled by us — ADR 0007). `$DESCRIBE_IT_MODEL` overrides it,
-and is read per call rather than frozen at import, so a long-lived process can
-be reconfigured without reloading the package.
+resolved when a describer is constructed — which is per call for `describe()`
+— rather than frozen at import, so a process that imports the package at
+start-up still picks up the environment it is given later. A long-lived
+`Describer` resolves once, deliberately, so its behaviour cannot change under
+it if the process edits its own environment.
 
 ## Alternatives considered
 
@@ -33,10 +36,11 @@ be reconfigured without reloading the package.
   the Gemma line refuses more readily. Caption quality is worth less here than
   getting an answer at all, so it lost. It remains a good explicit choice for
   callers whose images are uncontroversial.
-- **`qwen3.5:2b`** — smaller and faster, and named in the specification as a
-  fallback for constrained machines. Rejected as the default because a 2B
-  model's captions are noticeably weaker and the 4B fits comfortably on the
-  hardware this library targets.
+- **`qwen3.5:2b`** — the smaller model in the same family, and the obvious
+  choice for a constrained machine. The specification does not discuss it and
+  no comparison was run here, so it is recorded as an available option rather
+  than as a measured loser; the 4B was preferred simply because it fits
+  comfortably on the hardware this library targets.
 - **No default at all (require an explicit model)** — rejected: it would break
   the zero-config call that the whole API shape in ADR 0003 is built around.
 

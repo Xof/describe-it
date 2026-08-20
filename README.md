@@ -6,11 +6,12 @@ machine.
 ## What it is
 
 `describe-it` takes a `PIL.Image.Image` and returns a short, alt-text-quality
-description of it as a plain string, by asking a vision model served by a local
-[Ollama](https://ollama.com). Nothing leaves the machine. That matters for two
-reasons: generating alt text at volume is cheap locally and expensive through a
-commercial API, and the images may be NSFW, which hosted services refuse or
-penalise — a local model has no policy layer beyond whatever is in its weights.
+description of it as a plain string, by asking a vision model served by
+[Ollama](https://ollama.com) — on your own machine by default, and no third
+party at any point. That matters for two reasons: generating alt text at volume
+is cheap locally and expensive through a commercial API, and the images may be
+NSFW, which hosted services refuse or penalise — a local model has no policy
+layer beyond whatever is in its weights.
 
 The contract is deliberately small: **image in, description out, every failure
 is an exception.** No result objects, no status codes, no `None` returns.
@@ -128,7 +129,9 @@ DescribeItError
 | `DESCRIBE_IT_MODEL` | The model tag to use when none is passed. |
 | `OLLAMA_HOST` | The server to talk to when no `host` is passed — the same variable Ollama's own CLI reads, so a machine already configured for `ollama run` needs nothing else. |
 
-Both are read per call, not at import, and a blank value counts as unset.
+Both are read when a describer is constructed — which is per call for
+`describe()`, and once for a long-lived `Describer` — never at import time. A
+blank value counts as unset.
 
 ### Command line
 
@@ -158,9 +161,11 @@ default is `qwen3.5:4b` (~3 GB), chosen because the Qwen line refuses far less
 often than the alternatives, which matters when the images are the sort a
 hosted service would reject.
 
-- `qwen3.5:2b` — smaller and faster, noticeably weaker captions.
+- `qwen3.5:2b` — the smaller model in the same family, for a constrained
+  machine. Not benchmarked here.
 - `gemma4:e4b` — better captions, more likely to refuse.
-- `llava:7b` — older, widely available, and ignores the `language` option.
+- `llava:7b` — older and widely available; in this project's live runs it
+  ignored the `language` option and overran the word budget.
 
 A model that declines to describe an image produces `DescriptionRefusedError`
 rather than alt text, so a refusal-prone model turns into exceptions rather
