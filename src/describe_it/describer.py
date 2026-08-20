@@ -80,25 +80,38 @@ class Describer:
                 default in place; `"30m"` keeps a model resident across a
                 batch; `0` unloads it as soon as the call finishes.
             client: A ready-made transport, which makes `host` and `timeout`
-                irrelevant. This is a test seam — it is what lets the describer
-                tests run against a scripted client — and callers with a real
-                server should configure `host` and `timeout` instead.
+                irrelevant — including their validation, which belongs to the
+                client that would have used them. This is a test seam — it is
+                what lets the describer tests run against a scripted client —
+                and callers with a real server should configure `host` and
+                `timeout` instead.
 
         Raises:
-            ValueError: If `max_words` is below 1, or `timeout` is not
-                positive. Both would otherwise fail much later and much less
-                clearly: a zero timeout as an immediate socket error, and a
-                zero word budget as a prompt asking for a description of no
-                length at all.
+            TypeError: If `max_words` is not an `int`, or `timeout` is not a
+                number.
+            ValueError: If `max_words` is below 1, the model is blank, or the
+                host or timeout is unusable. All of them would otherwise fail
+                much later and much less clearly: a zero word budget as a
+                prompt asking for a description of no length at all, a blank
+                model as a puzzling 404.
         """
+        # bool is an int, and `max_words=True` meaning "one word" is a typo
+        # every time — the same rule `prepare_image` applies to `max_size`.
+        if isinstance(max_words, bool) or not isinstance(max_words, int):
+            raise TypeError(f"max_words must be an int, not {type(max_words).__name__}")
         if max_words < 1:
             raise ValueError(f"max_words must be at least 1, not {max_words}")
-        if timeout <= 0:
-            raise ValueError(
-                f"timeout must be a positive number of seconds, not {timeout}"
-            )
 
-        self.model = model if model is not None else default_model()
+        # Stripped because a model tag picked up from a file or a form arrives
+        # with a newline more often than not, and Ollama would 404 on it with a
+        # message that shows nothing wrong.
+        resolved_model = (model if model is not None else default_model()).strip()
+        if not resolved_model:
+            raise ValueError("model must not be blank; pass None for the default")
+        self.model = resolved_model
+        # `timeout` is validated by the client, which is the object that uses
+        # it; constructing the client here is what surfaces that at the same
+        # point in the caller's code as everything above.
         self.client = (
             client
             if client is not None
@@ -239,8 +252,10 @@ def describe(
         The description.
 
     Raises:
-        TypeError: If `image` is not a `PIL.Image.Image`.
-        ValueError: If `max_words`, `timeout` or `prompt` is out of range.
+        TypeError: If `image` is not a `PIL.Image.Image`, or if `max_words` or
+            `timeout` is not a number of the right kind.
+        ValueError: If `max_words`, `model`, `host`, `timeout` or `prompt` is
+            out of range or blank.
         ImageError: If the image cannot be prepared for upload.
         OllamaError: If the server cannot be reached or answers unusably.
         DescriptionError: If no usable description came back.

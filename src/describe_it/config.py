@@ -13,7 +13,7 @@ are only the static fallbacks those functions fall back to.
 
 import os
 import re
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 # Ollama's own default listening address.
 DEFAULT_HOST = "http://localhost:11434"
@@ -36,35 +36,45 @@ MODEL_ENV_VAR = "DESCRIBE_IT_MODEL"
 # would leave the most common bare host form unrecognised.
 _SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
+# The port assumed when the host names none. Ollama's CLI does the same thing:
+# a host without a port means Ollama's port, not the scheme's. Getting this
+# wrong is quiet and confusing — port 80 usually answers, with a web server.
+_DEFAULT_PORTS = {"http": 11434, "https": 443}
+
 
 def default_host() -> str:
     """Return the configured Ollama host, before normalisation.
 
     Returns:
-        `$OLLAMA_HOST` if it is set and non-empty, otherwise `DEFAULT_HOST`.
-        An empty variable is treated as unset: an exported-but-blank variable
-        is a deployment accident, never a request for a nameless server.
+        `$OLLAMA_HOST` if it holds anything but whitespace, otherwise
+        `DEFAULT_HOST`. A blank variable is treated as unset: an
+        exported-but-empty variable is a deployment accident, never a request
+        for a nameless server.
     """
-    return os.environ.get(HOST_ENV_VAR) or DEFAULT_HOST
+    return os.environ.get(HOST_ENV_VAR, "").strip() or DEFAULT_HOST
 
 
 def default_model() -> str:
     """Return the configured model tag.
 
     Returns:
-        `$DESCRIBE_IT_MODEL` if it is set and non-empty, otherwise
-        `DEFAULT_MODEL`.
+        `$DESCRIBE_IT_MODEL` if it holds anything but whitespace, otherwise
+        `DEFAULT_MODEL`. Blank is treated as unset, as it is for the host.
     """
-    return os.environ.get(MODEL_ENV_VAR) or DEFAULT_MODEL
+    return os.environ.get(MODEL_ENV_VAR, "").strip() or DEFAULT_MODEL
 
 
 def normalise_host(host: str) -> str:
     """Turn a host as a human writes it into a base URL requests can be built on.
 
-    Accepts what Ollama's own CLI accepts. `localhost:11434` gains the `http://`
-    it is missing; `https://` is left alone, because a remote Ollama behind a
-    reverse proxy is a real deployment; trailing slashes are removed so that
-    appending `/api/chat` never produces a doubled separator.
+    Accepts what Ollama's own CLI accepts, and fills in the same blanks it
+    does. `localhost:11434` gains the `http://` it is missing; `localhost`
+    gains Ollama's port as well, because a host with no port would otherwise
+    mean port 80 and reach a web server rather than a model; `https://` is
+    preserved, because a remote Ollama behind a reverse proxy is a real
+    deployment; trailing slashes go, so that appending `/api/chat` never
+    produces a doubled separator. A path is kept — that is how an Ollama
+    mounted under a prefix on a shared host is addressed.
 
     Args:
         host: A base URL or a bare `host:port`. Surrounding whitespace is
@@ -72,21 +82,53 @@ def normalise_host(host: str) -> str:
             stray spaces surprisingly often.
 
     Returns:
-        A base URL with a scheme and no trailing slash, ready for a path to be
-        appended to it.
+        A base URL with a scheme, an explicit port and no trailing slash, ready
+        for a path to be appended to it.
 
     Raises:
-        ValueError: If nothing usable as a hostname is left. Failing here names
-            the configuration mistake; letting it through would surface later
-            as an unrelated-looking connection error.
+        ValueError: If what is left is not something this client can post to: no
+            hostname, a scheme that is not HTTP, an unreadable port, embedded
+            credentials, or a query string or fragment (neither of which can
+            survive having `/api/chat` appended to it). Failing here names the
+            configuration mistake; letting it through would surface later as an
+            unrelated-looking connection error, or as a request sent somewhere
+            unintended.
     """
     trimmed = host.strip()
     if _SCHEME_RE.match(trimmed) is None:
         trimmed = f"http://{trimmed}"
-    normalised = trimmed.rstrip("/")
-    if not urlsplit(normalised).netloc:
+    # urlsplit lowercases the scheme for us, so HTTP:// and http:// converge.
+    split = urlsplit(trimmed.rstrip("/"))
+
+    # Checked first, and reported without quoting the host back: everything
+    # below puts the host in its message, and a message is the last place a
+    # password should end up.
+    if split.username is not None or split.password is not None:
+        raise ValueError(
+            "host must not contain credentials; Ollama has no authentication "
+            "of its own, so put any that a proxy needs in the proxy's config"
+        )
+    if not split.hostname:
         raise ValueError(
             f"host {host!r} has no hostname; expected something like "
             f"'localhost:11434' or 'http://localhost:11434'"
         )
-    return normalised
+    if split.scheme not in _DEFAULT_PORTS:
+        raise ValueError(f"host {host!r} must use http or https, not {split.scheme!r}")
+    if split.query or split.fragment:
+        raise ValueError(
+            f"host {host!r} must not have a query string or fragment; it is a "
+            f"base URL, and the API path is appended to it"
+        )
+    try:
+        port = split.port
+    except ValueError as exc:
+        # urlsplit defers the port until it is asked for, and then reports it
+        # in terms of casting rather than of configuration.
+        raise ValueError(f"host {host!r} has an unreadable port") from exc
+
+    if port is None:
+        netloc = f"{split.netloc}:{_DEFAULT_PORTS[split.scheme]}"
+    else:
+        netloc = split.netloc
+    return urlunsplit((split.scheme, netloc, split.path, "", ""))

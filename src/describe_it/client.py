@@ -22,7 +22,15 @@ from http import HTTPStatus
 from http.client import HTTPException, HTTPResponse
 from typing import cast
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import (
+    HTTPDefaultErrorHandler,
+    HTTPErrorProcessor,
+    HTTPHandler,
+    HTTPSHandler,
+    OpenerDirector,
+    ProxyHandler,
+    Request,
+)
 
 from describe_it.config import DEFAULT_HOST, normalise_host
 from describe_it.exceptions import (
@@ -63,14 +71,29 @@ class OllamaClient:
                 class is a transport, and reading the ambient environment is a
                 policy decision that belongs to `Describer`, which resolves the
                 variable and passes the result in explicitly.
-            timeout: Socket timeout in seconds. Generous by default because a
-                cold model load on a laptop runs to tens of seconds.
+            timeout: Socket timeout in seconds, applied per read.  Generous by
+                default because a cold model load on a laptop runs to tens of
+                seconds.
 
         Raises:
-            ValueError: If `host` contains no hostname.
+            TypeError: If `timeout` is not a number of seconds.
+            ValueError: If `host` is not usable as a base URL, or `timeout` is
+                not positive. Both are caught here rather than at the first
+                request, so a misconfiguration fails where it was written.
         """
+        # bool is an int, and `timeout=True` meaning "one second" is a typo
+        # every time it is written.
+        if isinstance(timeout, bool) or not isinstance(timeout, int | float):
+            raise TypeError(
+                f"timeout must be a number of seconds, not {type(timeout).__name__}"
+            )
+        if timeout <= 0:
+            raise ValueError(
+                f"timeout must be a positive number of seconds, not {timeout}"
+            )
         self.host = normalise_host(host)
         self.timeout = timeout
+        self._opener = _build_opener()
 
     def chat(
         self,
@@ -259,12 +282,19 @@ class OllamaClient:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        # None until a status line has been read, which is exactly the
+        # distinction OllamaResponseError.status_code draws: a reply that was
+        # cut short still has a status worth reporting, a reply that was never
+        # HTTP has none.
+        status: int | None = None
         try:
-            with urlopen(request, timeout=self.timeout) as response:
-                # urlopen is typed as returning Any; for an http(s) URL it is
+            with self._opener.open(request, timeout=self.timeout) as response:
+                # open() is typed as returning Any; for an http(s) URL it is
                 # always an HTTPResponse, and saying so gives callers a real
                 # type instead of propagating Any through the module.
-                yield cast("HTTPResponse", response)
+                typed = cast("HTTPResponse", response)
+                status = typed.status
+                yield typed
         # HTTPError is a subclass of URLError, which is a subclass of OSError,
         # so the handlers run most specific first.
         except HTTPError as exc:
@@ -291,9 +321,12 @@ class OllamaClient:
             # answered on the port but did not speak HTTP (a TLS listener, an
             # unrelated daemon), or the reply was cut short of its declared
             # length. The server answered and the answer is unusable, which is
-            # what OllamaResponseError means; there is no status to report.
+            # what OllamaResponseError means. The repr is truncated like any
+            # other body: a bad status line is server output, and a long one
+            # would otherwise become the whole error message.
             raise OllamaResponseError(
-                f"{context} got a malformed HTTP reply: {exc!r}"
+                f"{context} got a malformed HTTP reply: {_truncate(repr(exc))}",
+                status_code=status,
             ) from exc
         except OSError as exc:
             # A reset or a broken pipe part way through a reply. The contract
@@ -332,6 +365,18 @@ class OllamaClient:
         if exc.code == HTTPStatus.NOT_FOUND and _names_a_missing_model(raw):
             return ModelNotFoundError(model)
         body = _truncate(raw)
+        redirect = exc.headers.get("Location")
+        if redirect is not None:
+            # Redirects are not followed (see `_build_opener`), so this is a
+            # dead end rather than a step on the way somewhere. Naming the
+            # target is the whole diagnosis: it is nearly always a host that
+            # should have been written with the other scheme or another port.
+            return OllamaResponseError(
+                f"{context} was redirected to {_truncate(redirect)} "
+                f"(HTTP {exc.code}), and redirects are not followed",
+                status_code=exc.code,
+                body=body,
+            )
         return OllamaResponseError(
             f"{context} failed with HTTP {exc.code}: {body}",
             status_code=exc.code,
@@ -385,6 +430,39 @@ class OllamaClient:
             message reads as a diagnosis rather than as a category.
         """
         return f"{operation} request for model {model!r} on {self.host}"
+
+
+def _build_opener() -> OpenerDirector:
+    """Build the opener every request from one client goes through.
+
+    Assembled by hand rather than with `urllib.request.build_opener`, to leave
+    out two of its defaults:
+
+    - **No proxy handler with an environment behind it.** `$http_proxy` is set
+      machine-wide in many corporate environments, and urllib's proxy support
+      has no loopback exemption, so the module-level `urlopen` would route
+      `http://localhost:11434` through a proxy that has never heard of it —
+      where `ollama` itself, which honours no such variable, connects directly.
+      Ollama is a local service; an explicitly empty `ProxyHandler` says so.
+    - **No redirect handler.** urllib follows a 30x by reissuing the request,
+      and it rewrites a redirected POST into a GET with no body: the image
+      would silently not be sent, and the server would answer something
+      unrelated to what was asked. Better to surface the redirect.
+
+    Returns:
+        An opener with HTTP, HTTPS and the two error handlers that turn a
+        non-2xx status into `HTTPError`.
+    """
+    opener = OpenerDirector()
+    for handler in (
+        ProxyHandler({}),
+        HTTPHandler(),
+        HTTPSHandler(),
+        HTTPErrorProcessor(),
+        HTTPDefaultErrorHandler(),
+    ):
+        opener.add_handler(handler)
+    return opener
 
 
 def _names_a_missing_model(body: str) -> bool:

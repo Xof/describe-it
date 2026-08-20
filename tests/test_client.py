@@ -4,10 +4,11 @@ Everything here runs against the in-process fake server from `conftest`, so the
 assertions cover the real urllib path: what went out on the wire, and what the
 client made of what came back. The two exceptions are the wrapped-timeout and
 reset-connection cases, which a cooperating server cannot produce on demand and
-which are provoked by replacing `urlopen` for the length of one call.
+which are provoked by replacing one client's opener for a single call.
 """
 
 import base64
+import urllib.request
 from collections.abc import Callable
 from http.client import HTTPException
 from typing import NoReturn
@@ -116,10 +117,20 @@ def test_chat_reaches_the_server_however_the_host_is_spelled(
         ("localhost:11434", "http://localhost:11434"),
         ("http://x:1/", "http://x:1"),
         ("http://x:1///", "http://x:1"),
-        ("https://ollama.example.com", "https://ollama.example.com"),
-        ("https://ollama.example.com/", "https://ollama.example.com"),
         ("  localhost:11434  ", "http://localhost:11434"),
-        ("http://proxy/ollama/", "http://proxy/ollama"),
+        # A host with no port means Ollama's port, as it does to Ollama's own
+        # CLI -- not port 80, where a web server usually answers.
+        ("localhost", "http://localhost:11434"),
+        ("http://ollama.example.com", "http://ollama.example.com:11434"),
+        ("https://h", "https://h:443"),
+        ("https://ollama.example.com/", "https://ollama.example.com:443"),
+        ("h:1", "http://h:1"),
+        ("[::1]", "http://[::1]:11434"),
+        # An uppercase scheme is the same scheme.
+        ("HTTP://h:1", "http://h:1"),
+        # A path survives: that is how an Ollama behind a prefix is addressed.
+        ("http://proxy/ollama/", "http://proxy:11434/ollama"),
+        ("http://proxy:8080/ollama", "http://proxy:8080/ollama"),
     ],
 )
 def test_normalise_host_rewrites_only_what_it_must(
@@ -150,8 +161,12 @@ def test_normalise_host_always_produces_a_usable_base_url(
     assert not normalised.endswith("/")
     split = urlsplit(normalised)
     # An absent scheme becomes http; a stated one survives untouched.
-    assert split.scheme == (scheme.removesuffix("://") or "http")
-    assert split.netloc == f"{hostname}{port}"
+    expected_scheme = scheme.removesuffix("://") or "http"
+    assert split.scheme == expected_scheme
+    # The port is always explicit afterwards: a stated one, or the default for
+    # the scheme -- 11434 for Ollama over http, 443 for https.
+    expected_port = port or f":{11434 if expected_scheme == 'http' else 443}"
+    assert split.netloc == f"{hostname}{expected_port}"
     # Round-trips, so appending a path to it produces a URL urllib can parse.
     assert urlunsplit(split) == normalised
 
@@ -306,10 +321,11 @@ def test_a_timeout_wrapped_by_urllib_is_still_a_timeout(
     def fail(*args: object, **kwargs: object) -> NoReturn:
         raise URLError(TimeoutError("timed out"))
 
-    monkeypatch.setattr("describe_it.client.urlopen", fail)
+    client = OllamaClient(host="http://127.0.0.1:1")
+    monkeypatch.setattr(client._opener, "open", fail)
 
     with pytest.raises(OllamaTimeoutError, match="timed out after") as caught:
-        _chat(OllamaClient(host="http://127.0.0.1:1"))
+        _chat(client)
 
     assert isinstance(caught.value.__cause__, URLError)
 
@@ -322,10 +338,11 @@ def test_a_reset_connection_is_a_connection_error(
     def fail(*args: object, **kwargs: object) -> NoReturn:
         raise ConnectionResetError("connection reset by peer")
 
-    monkeypatch.setattr("describe_it.client.urlopen", fail)
+    client = OllamaClient(host="http://127.0.0.1:1")
+    monkeypatch.setattr(client._opener, "open", fail)
 
     with pytest.raises(OllamaConnectionError, match="connection reset") as caught:
-        _chat(OllamaClient(host="http://127.0.0.1:1"))
+        _chat(client)
 
     assert isinstance(caught.value.__cause__, ConnectionResetError)
 
@@ -516,3 +533,125 @@ def test_the_missing_model_marker_is_matched_case_insensitively(
 
     with pytest.raises(ModelNotFoundError):
         _chat(OllamaClient(host=server.url), model="foo")
+
+
+def test_proxy_environment_variables_are_ignored(
+    server: FakeOllama, other_server: FakeOllama, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # $http_proxy is set machine-wide in many corporate environments, and
+    # urllib exempts nothing from it -- not even loopback. Ollama is a local
+    # service and its own CLI honours no such variable, so neither does this.
+    monkeypatch.setenv("http_proxy", other_server.url)
+    monkeypatch.setenv("HTTP_PROXY", other_server.url)
+    monkeypatch.setenv("ALL_PROXY", other_server.url)
+    # The bypass list is the one thing that could make this pass by accident.
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    # urllib caches one global opener, built on first use; clearing it means a
+    # client that fell back to the module-level urlopen would build a fresh one
+    # now, pick the proxy up, and fail this test rather than pass it by luck.
+    monkeypatch.setattr(urllib.request, "_opener", None, raising=False)
+    server.script_json("/api/chat", {"message": {"content": "A red circle."}})
+
+    assert _chat(OllamaClient(host=server.url)) == "A red circle."
+
+    assert server.paths() == ["/api/chat"]
+    assert other_server.requests == []
+
+
+def test_a_redirect_is_reported_rather_than_followed(
+    server: FakeOllama, other_server: FakeOllama
+) -> None:
+    # urllib follows a 30x by reissuing the request, and rewrites a redirected
+    # POST into a body-less GET: the image would silently not be sent and the
+    # answer would be about nothing. The redirect is the finding.
+    location = f"{other_server.url}/api/chat"
+    server.script("/api/chat", status=301, headers=(("Location", location),))
+
+    with pytest.raises(
+        OllamaResponseError, match="redirects are not followed"
+    ) as caught:
+        _chat(OllamaClient(host=server.url))
+
+    assert location in str(caught.value)
+    assert caught.value.status_code == 301
+    assert other_server.requests == []
+
+
+def test_a_long_malformed_status_line_is_truncated(server: FakeOllama) -> None:
+    # A bad status line is server output like any other body, and this one is
+    # quoted into the message; unbounded, a chatty non-HTTP daemon would become
+    # the whole error.
+    server.script("/api/chat", raw=b"x" * 3000 + b"\r\n\r\n")
+
+    with pytest.raises(OllamaResponseError, match="malformed HTTP reply") as caught:
+        _chat(OllamaClient(host=server.url))
+
+    assert len(str(caught.value)) < 800
+
+
+def test_a_reply_cut_short_after_a_status_keeps_the_status(
+    server: FakeOllama,
+) -> None:
+    # The status line was read before the body failed, so it is known and worth
+    # reporting; only a reply that never parsed as HTTP has no status at all.
+    server.script(
+        "/api/chat",
+        raw=b"HTTP/1.1 200 OK\r\nContent-Length: 500\r\n\r\ntoo short",
+    )
+
+    with pytest.raises(OllamaResponseError, match="malformed HTTP reply") as caught:
+        _chat(OllamaClient(host=server.url))
+
+    assert caught.value.status_code == 200
+
+
+@pytest.mark.parametrize("timeout", [0, 0.0, -1.0])
+def test_a_non_positive_timeout_is_rejected(timeout: float) -> None:
+    with pytest.raises(ValueError, match="timeout must be a positive"):
+        OllamaClient(timeout=timeout)
+
+
+@pytest.mark.parametrize("timeout", ["5", True, None])
+def test_a_timeout_that_is_not_a_number_is_rejected(timeout: object) -> None:
+    # Without this, a string timeout surfaces from deep inside socket setup.
+    with pytest.raises(TypeError, match="timeout must be a number"):
+        OllamaClient(timeout=timeout)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "given_host",
+    [
+        "http://user:secret@h:1",
+        "http://user@h:1",
+        "user:secret@h:1",
+    ],
+)
+def test_normalise_host_rejects_embedded_credentials(given_host: str) -> None:
+    with pytest.raises(ValueError, match="must not contain credentials") as caught:
+        normalise_host(given_host)
+
+    # The message must not quote the host back, or the password lands in every
+    # log that records the exception.
+    assert "secret" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "given_host",
+    ["http://h:1?debug=1", "http://h:1#frag", "http://h:1/ollama?x=1"],
+)
+def test_normalise_host_rejects_a_query_string_or_fragment(given_host: str) -> None:
+    with pytest.raises(ValueError, match="query string or fragment"):
+        normalise_host(given_host)
+
+
+@pytest.mark.parametrize("given_host", ["ftp://h:1", "file://h/x", "ws://h:1"])
+def test_normalise_host_rejects_a_scheme_it_cannot_post_to(given_host: str) -> None:
+    with pytest.raises(ValueError, match="must use http or https"):
+        normalise_host(given_host)
+
+
+@pytest.mark.parametrize("given_host", ["localhost:eleven", "http://h:1x"])
+def test_normalise_host_rejects_an_unreadable_port(given_host: str) -> None:
+    with pytest.raises(ValueError, match="unreadable port"):
+        normalise_host(given_host)

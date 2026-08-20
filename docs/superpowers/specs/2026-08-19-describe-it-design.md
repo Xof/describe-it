@@ -445,8 +445,31 @@ and the configured Ollama host answers `/api/version`.
   for a model that does not exist upstream; `ensure_model()` surfaces that as
   `OllamaResponseError`, not `ModelNotFoundError` (which is reserved for "not
   present on this server").
-- §2.7: `OllamaResponseError.status_code` is `None` only when no HTTP status
-  was obtained at all (malformed status line, reply truncated before
-  `Content-Length`, via `http.client.HTTPException`); an unparseable 2xx body
-  reports the real status. `ModelNotFoundError`'s message names the model and
-  the `ollama pull` remedy but not the host or operation.
+- §2.7: `OllamaResponseError.status_code` is `None` only when no status line
+  was ever parsed — the reply was not HTTP at all, surfacing as an
+  `http.client.HTTPException`. Once a status has been read it is reported, both
+  for an unparseable 2xx body and for a reply cut short of its declared
+  `Content-Length`. `ModelNotFoundError`'s message names the model and the
+  `ollama pull` remedy but not the host or operation.
+- §5: proxy environment variables (`$http_proxy` and friends) are ignored. The
+  client builds one private `OpenerDirector` per instance with an empty
+  `ProxyHandler`, because Ollama is a local service and urllib's proxy support
+  exempts nothing — not even loopback — so a machine-wide corporate proxy would
+  otherwise capture traffic that `ollama` itself sends direct.
+- §5: redirects are not followed. That same private opener has no
+  `HTTPRedirectHandler`, because urllib follows a 30x by rewriting a redirected
+  POST into a body-less GET — the image would silently not be sent. A 3xx is
+  reported as `OllamaResponseError` naming the `Location` it points at.
+- §2.2: a `host` with no port gets Ollama's default for the scheme (11434 for
+  `http`, 443 for `https`), as Ollama's own CLI does; an explicit port is kept,
+  and so is a path (an Ollama mounted under a prefix). A `host` carrying
+  userinfo, a query string or a fragment raises `ValueError`, as does one whose
+  scheme is neither `http` nor `https`, or whose port is unreadable. The
+  credentials message does not quote the host back, so a password cannot reach
+  a log through it.
+- §2.2/§2.3: `timeout` validation lives in `OllamaClient` (`TypeError` if it is
+  not a real number, `ValueError` if it is not positive), and `Describer`
+  inherits it by constructing the client; passing `client=` therefore skips it
+  along with `host`. `model` must not be blank after stripping (`ValueError`),
+  a blank `$DESCRIBE_IT_MODEL` counts as unset exactly as a blank `$OLLAMA_HOST`
+  does, and `max_words` must be an `int` and not a `bool` (`TypeError`).

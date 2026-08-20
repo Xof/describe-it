@@ -189,12 +189,12 @@ def test_explicit_arguments_beat_the_environment(
     assert describer.client.host == "http://localhost:1234"
 
 
-@pytest.mark.parametrize("value", ["", None])
+@pytest.mark.parametrize("value", ["", "   ", None])
 def test_the_packaged_defaults_apply_when_the_environment_is_silent(
     monkeypatch: pytest.MonkeyPatch, value: str | None
 ) -> None:
-    # An exported-but-empty variable is a deployment accident, and is treated
-    # the same as an unset one.
+    # An exported-but-blank variable is a deployment accident, and is treated
+    # the same as an unset one -- for the model exactly as for the host.
     for name in ("DESCRIBE_IT_MODEL", "OLLAMA_HOST"):
         if value is None:
             monkeypatch.delenv(name, raising=False)
@@ -214,9 +214,42 @@ def test_a_word_budget_below_one_is_rejected(max_words: int) -> None:
 
 
 @pytest.mark.parametrize("timeout", [0.0, -1.0])
-def test_a_non_positive_timeout_is_rejected(timeout: float) -> None:
+def test_a_non_positive_timeout_is_rejected_at_construction(timeout: float) -> None:
+    # Validated by the client, which is the object that uses it, but a caller
+    # who never mentions a client must still find out here rather than at the
+    # first description.
     with pytest.raises(ValueError, match="timeout must be a positive"):
         Describer(timeout=timeout)
+
+
+def test_a_timeout_that_is_not_a_number_is_rejected_at_construction() -> None:
+    with pytest.raises(TypeError, match="timeout must be a number"):
+        Describer(timeout="5")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("max_words", [1.5, True, "30"])
+def test_a_word_budget_that_is_not_an_int_is_rejected(max_words: object) -> None:
+    # bool included on purpose: max_words=True would otherwise mean one word.
+    with pytest.raises(TypeError, match="max_words must be an int"):
+        Describer(max_words=max_words)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("model", ["", "   ", "\n"])
+def test_a_blank_model_is_rejected(model: str) -> None:
+    with pytest.raises(ValueError, match="model must not be blank"):
+        Describer(model=model)
+
+
+def test_a_model_tag_is_stripped(server: FakeOllama) -> None:
+    # A tag read from a file or a form arrives with a newline more often than
+    # not, and Ollama would 404 on it with a message that shows nothing wrong.
+    server.script_json("/api/chat", _reply("A red rectangle."))
+    describer = Describer(model=f"  {_MODEL}\n", host=server.url)
+
+    assert describer.model == _MODEL
+
+    describer.describe(_image())
+    assert server.requests[0].json_body["model"] == _MODEL
 
 
 def test_check_is_silent_when_the_server_has_the_model(server: FakeOllama) -> None:

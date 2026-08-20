@@ -262,14 +262,30 @@ class FakeOllama:
             ) from failure
 
 
-@pytest.fixture
-def server() -> Iterator[FakeOllama]:
-    """Yield a running fake Ollama, torn down after the test."""
+def _running_server() -> Iterator[FakeOllama]:
+    """Start a fake server and stop it once the test is done with it."""
     fake = FakeOllama()
     try:
         yield fake
     finally:
         fake.close()
+
+
+@pytest.fixture
+def server() -> Iterator[FakeOllama]:
+    """Yield a running fake Ollama, torn down after the test."""
+    yield from _running_server()
+
+
+@pytest.fixture
+def other_server() -> Iterator[FakeOllama]:
+    """Yield a second fake server, for asserting traffic did NOT reach it.
+
+    Standing in for a proxy or a redirect target: a test points the client's
+    environment or a `Location` header at this one and then checks it recorded
+    nothing, which no single-server fixture can express.
+    """
+    yield from _running_server()
 
 
 @pytest.fixture
