@@ -1,0 +1,102 @@
+[project]
+name = "describe-it"
+version = "1.0.0"
+description = "Alt-text descriptions for PIL images via a local Ollama vision model"
+readme = "README.md"
+authors = [
+    { name = "Christophe Pettus", email = "cpettus@pgexperts.com" }
+]
+# 3.12 rather than the scaffold's 3.14 so the library installs on the Python
+# shipped by current stable distributions; CI covers 3.12 through 3.14.
+requires-python = ">=3.12"
+# Pillow is the only runtime dependency: the Ollama transport is plain
+# urllib.request from the standard library.
+dependencies = ["pillow>=10"]
+# PEP 639: an SPDX expression plus the file to ship, rather than a
+# "License ::" classifier.
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = [
+    "accessibility",
+    "alt-text",
+    "captioning",
+    "image",
+    "ollama",
+    "pillow",
+    "vision",
+]
+# No "License ::" classifier: the license is declared as an SPDX expression
+# above, and PEP 639 deprecates carrying it a second time here.
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Multimedia :: Graphics",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Repository = "https://github.com/Xof/describe-it"
+Issues = "https://github.com/Xof/describe-it/issues"
+
+[project.scripts]
+describe-it = "describe_it.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.100",
+    "mypy>=1.11",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+]
+
+[tool.ruff]
+line-length = 88
+src = ["src", "tests"]
+# The design spec under docs/ is a record of what was agreed; ruff would
+# reformat the Python blocks inside it and quietly rewrite the record.
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "N", "ANN", "D"]
+# Curly quotes are subject matter here, not typos: they are one of the wrapper
+# pairs stripped off a model's reply.
+allowed-confusables = ["“", "”", "‘", "’"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Test functions document themselves through their names; requiring a docstring
+# on every one of them buys nothing and hides the assertions behind prose.
+"tests/**" = ["D100", "D101", "D102", "D103", "D104", "D105"]
+
+[tool.mypy]
+strict = true
+# Check against the declared floor, not whatever interpreter happens to be
+# active locally, so a 3.13-only construct is caught here rather than in CI.
+python_version = "3.12"
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers"
+markers = [
+    "integration: needs a live Ollama server; excluded from the CI gate",
+]
+
+[tool.coverage.run]
+source = ["describe_it"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+exclude_also = ["if __name__ == .__main__.:"]

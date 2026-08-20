@@ -1,0 +1,36 @@
+# Publishes the sdist and wheel to PyPI by trusted publishing (OIDC): no API
+# token is stored anywhere. The job's id-token permission is what lets it ask
+# GitHub for a short-lived identity token, which PyPI exchanges for an upload
+# credential scoped to this repository and workflow. That exchange only works
+# once the matching publisher (owner, repo, this filename, the environment
+# name) has been registered on the PyPI side.
+#
+# Creating a GitHub release is the deliberate, human trigger. CI on the push
+# has already gated lint, types and tests; this workflow builds what is tagged
+# and ships it.
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/describe-it
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - run: uv build
+
+      # Uploads everything in dist/ with PEP 740 attestations on by default.
+      - uses: pypa/gh-action-pypi-publish@release/v1
