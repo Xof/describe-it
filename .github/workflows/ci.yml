@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  # Integration needs a model download and a live server, so it is manual.
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv and Python ${{ matrix.python-version }}
+        uses: astral-sh/setup-uv@v5
+        with:
+          # Overrides the repo's .python-version pin so the matrix is real.
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      - run: uv sync --group dev
+
+      - run: uv run ruff check .
+
+      - run: uv run ruff format --check .
+
+      - run: uv run mypy src tests
+
+      - run: uv run pytest --cov --cov-report=term-missing -m "not integration"
+
+  integration:
+    # Opt-in only, and non-blocking: these tests talk to a real vision model,
+    # whose output is not deterministic enough to gate a merge on.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 30
+    env:
+      DESCRIBE_IT_INTEGRATION: "1"
+      DESCRIBE_IT_MODEL: qwen3.5:4b
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - run: uv sync --group dev
+
+      - name: Install and start Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          for _ in $(seq 1 30); do
+            curl -sf http://localhost:11434/api/version && break
+            sleep 1
+          done
+          ollama pull "$DESCRIBE_IT_MODEL"
+
+      - run: uv run pytest -m integration
