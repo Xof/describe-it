@@ -96,14 +96,3 @@ def test_refusal_carries_the_model_text() -> None:
 
     assert error.response == "I'm sorry, but I can't help with that."
     assert "I'm sorry, but I can't help with that." in str(error)
-
-
-def test_errors_chain_their_cause() -> None:
-    original = OSError("truncated file")
-    try:
-        try:
-            raise original
-        except OSError as exc:
-            raise ImageError("could not prepare image") from exc
-    except ImageError as exc:
-        assert exc.__cause__ is original

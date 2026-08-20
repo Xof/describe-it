@@ -6,23 +6,32 @@ from hypothesis import strategies as st
 
 from describe_it.exceptions import DescriptionError, DescriptionRefusedError
 from describe_it.prompt import (
+    INVISIBLE_RE,
     REFUSAL_RE,
     THINK_RE,
+    UNCLOSED_THINK_RE,
     build_prompt,
     clean_response,
 )
 
 _CONTEXT_SENTENCE = "The image appears in this context:"
 
-# Every opening phrase the heuristic knows, as a model would actually write it.
+# Every opening phrase the heuristic knows, as a model would actually write it
+# — including the typographic apostrophes a model produces at least as often
+# as ASCII ones.
 _REFUSALS = [
     "I'm sorry, but I can't help with that.",
+    "I’m sorry, but I can’t help with that.",
+    "I‘m sorry, but I can‘t help with that.",
     "Im sorry, I will not do that.",
+    "I am sorry, but I cannot help with this image.",
     "I cannot describe this image.",
     "I can't describe this image.",
+    "I can’t describe this image.",
     "I cant describe this image.",
     "I am unable to describe this image.",
     "I'm unable to describe this image.",
+    "I’m unable to describe this image.",
     "I apologize, but I will not describe this image.",
     "I apologise, but I will not describe this image.",
     "As an AI, I do not describe images like this one.",
@@ -38,6 +47,8 @@ _WRAPPER_PAIRS = [
     ("```", "```"),
     ("**", "**"),
     ("*", "*"),
+    ("__", "__"),
+    ("_", "_"),
 ]
 
 _CLEANING_CASES = [
@@ -49,9 +60,14 @@ _CLEANING_CASES = [
     ("<think>Let me look.</think>A grey cat.", "A grey cat."),
     ("<think>\nmulti\nline\n</think>\n\nA grey cat.", "A grey cat."),
     ("<THINK>upper</THINK> A grey cat.", "A grey cat."),
+    ("A grey cat. <think>trailing thought never closed", "A grey cat."),
     ("Alt text: A grey cat.", "A grey cat."),
     ("alt:A grey cat.", "A grey cat."),
     ("ALT TEXT : A grey cat.", "A grey cat."),
+    ("**Alt text:** A grey cat.", "A grey cat."),
+    ("**Alt text**: A grey cat.", "A grey cat."),
+    ("`Alt:` A grey cat.", "A grey cat."),
+    ("_Alt text:_ A grey cat.", "A grey cat."),
     ('"A grey cat."', "A grey cat."),
     ("'A grey cat.'", "A grey cat."),
     ("“A grey cat.”", "A grey cat."),
@@ -59,12 +75,27 @@ _CLEANING_CASES = [
     ("`A grey cat.`", "A grey cat."),
     ("```A grey cat.```", "A grey cat."),
     ("```\nA grey cat.\n```", "A grey cat."),
+    ("```text\nA grey cat.\n```", "A grey cat."),
+    ("```json\nA grey cat.\n```", "A grey cat."),
     ("**A grey cat.**", "A grey cat."),
     ("*A grey cat.*", "A grey cat."),
+    ("_A grey cat._", "A grey cat."),
+    ("__A grey cat.__", "A grey cat."),
     ('**"Alt text: A grey cat."**', "A grey cat."),
     ("A grey cat\n\nasleep   on\ta red chair.", "A grey cat asleep on a red chair."),
     ("A cat *sitting* on a mat.", "A cat *sitting* on a mat."),
-    ('She said "hello" to the dog.', 'She said "hello" to the dog.'),
+    ("﻿A grey cat.", "A grey cat."),
+    ("A​cat", "Acat"),
+    # Balance: quoted fragments at both ends are text, not wrapping.
+    (
+        '"Hello" is written on the sign, which reads "Bye"',
+        '"Hello" is written on the sign, which reads "Bye"',
+    ),
+    (
+        "'Hello' is written on the sign, which reads 'Bye'",
+        "'Hello' is written on the sign, which reads 'Bye'",
+    ),
+    ("*Red* balloons and *blue* ones.", "*Red* balloons and *blue* ones."),
 ]
 
 _EMPTY_CASES = [
@@ -73,9 +104,15 @@ _EMPTY_CASES = [
     "\n\n\t",
     "<think>only thinking</think>",
     "<think>a</think>\n  \n",
+    "<think>thinking forever about this cat.",
+    "﻿​⁠",
     "**  **",
     '""',
     "**",
+    '"',
+    "*",
+    "`",
+    "_",
 ]
 
 
@@ -100,7 +137,24 @@ def test_build_prompt_includes_the_context_sentence_when_given() -> None:
     assert f"{_CONTEXT_SENTENCE} product photo on a shoe listing." in prompt
 
 
-@pytest.mark.parametrize("context", [None, "", "   \n "])
+@pytest.mark.parametrize(
+    ("context", "expected"),
+    [
+        ("ends with period.", "ends with period."),
+        ("ends with periods...", "ends with periods."),
+        ("  padded\n\tand   spaced  ", "padded and spaced."),
+    ],
+)
+def test_build_prompt_tidies_the_context(context: str, expected: str) -> None:
+    prompt = build_prompt(
+        max_words=30, language="English", context=context, prompt=None
+    )
+
+    assert f"{_CONTEXT_SENTENCE} {expected}" in prompt
+    assert ".." not in prompt
+
+
+@pytest.mark.parametrize("context", [None, "", "   \n ", "..."])
 def test_build_prompt_omits_the_context_sentence_when_blank(
     context: str | None,
 ) -> None:
@@ -120,6 +174,12 @@ def test_explicit_prompt_is_returned_verbatim() -> None:
     )
 
     assert prompt == "Describe the image in one word."
+
+
+@pytest.mark.parametrize("prompt", ["", "   \n"])
+def test_blank_explicit_prompt_is_rejected(prompt: str) -> None:
+    with pytest.raises(ValueError, match="prompt must not be empty"):
+        build_prompt(max_words=30, language="English", context=None, prompt=prompt)
 
 
 @pytest.mark.parametrize(("raw", "expected"), _CLEANING_CASES)
@@ -148,6 +208,13 @@ def test_refusals_raise_with_the_cleaned_text_attached(raw: str) -> None:
         clean_response(f'**"{raw}"**')
 
     assert caught.value.response == raw
+
+
+def test_invisible_characters_do_not_hide_a_refusal() -> None:
+    with pytest.raises(DescriptionRefusedError) as caught:
+        clean_response("﻿I cannot describe this.")
+
+    assert caught.value.response == "I cannot describe this."
 
 
 def test_long_refusal_with_a_late_sentence_break_is_caught() -> None:
@@ -202,14 +269,19 @@ def test_refusal_phrases_only_count_at_the_start() -> None:
     assert clean_response(text) == text
 
 
-def test_think_pattern_spans_newlines_and_ignores_case() -> None:
+def test_think_patterns_span_newlines_and_ignore_case() -> None:
     assert THINK_RE.sub("", "<Think>\na\nb\n</think>kept") == "kept"
+    assert UNCLOSED_THINK_RE.sub("", "kept <THINK>\nrambling") == "kept "
+
+
+def test_invisible_pattern_covers_the_zero_width_family() -> None:
+    assert INVISIBLE_RE.sub("", "a﻿​‌‍⁠b") == "ab"
 
 
 _SAFE_BODY = st.text(
-    alphabet=st.sampled_from(list("abc de,.'\"*`\n\t")), min_size=0, max_size=40
+    alphabet=st.sampled_from(list("acinost e.,'’“”*_`\n")), min_size=2, max_size=40
 )
-_LABELS = st.sampled_from(["", "Alt text: ", "alt:", "ALT TEXT : "])
+_LABELS = st.sampled_from(["", "Alt text: ", "alt:", "**ALT TEXT :** "])
 
 
 @given(
@@ -227,9 +299,9 @@ def test_clean_response_is_idempotent(
     try:
         once = clean_response(raw)
     except DescriptionError:
-        # A generated body can clean away to nothing, and nothing has no fixed
-        # point to compare against. (The alphabet cannot spell a refusal, but
-        # DescriptionError covers that subclass too.)
+        # A generated body can clean away to nothing, or (with this alphabet,
+        # rarely) read as a refusal. Neither outcome has a fixed point to
+        # compare against; both have their own tests above.
         assume(False)
         raise
 

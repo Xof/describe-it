@@ -7,6 +7,7 @@ taken well inside a solid block so chroma subsampling cannot reach it.
 """
 
 import io
+import struct
 from collections.abc import Sequence
 from typing import Any
 
@@ -23,19 +24,26 @@ from describe_it.image import prepare_image
 _MODE_FILLS: dict[str, Any] = {
     "RGB": (10, 120, 200),
     "RGBA": (10, 120, 200, 128),
+    "RGBa": (10, 120, 200, 128),
     "LA": (140, 128),
+    "La": (140, 255),
     "L": 140,
     "P": 3,
     "PA": (3, 128),
     "1": 1,
     "CMYK": (10, 120, 200, 5),
     "I;16": 40000,
+    "I;16B": 40000,
+    "I;16L": 40000,
+    "I;16N": 40000,
     "I": 70000,
     "F": 0.5,
 }
 
 _WHITE = (255, 255, 255)
 _RED = (255, 0, 0)
+_BLUE = (0, 0, 255)
+_ORIENTATION_TAG = 274
 
 
 def _decode(data: bytes) -> Image.Image:
@@ -74,6 +82,75 @@ def _banded(mode: str, values: Sequence[Any], height: int = 32) -> Image.Image:
     return image
 
 
+def _assert_three_grey_bands(decoded: Image.Image) -> None:
+    """Assert a three-band image spans dark, mid and light greys.
+
+    A clipping conversion renders both of the brighter bands as white, so the
+    middle band is what proves the samples were scaled rather than clamped.
+    """
+    dark, mid, light = (_pixel(decoded, (x, 16))[0] for x in (16, 48, 80))
+    assert dark < 40
+    assert 90 < mid < 165
+    assert light > 215
+
+
+def _big_endian_16bit_tiff(values: Sequence[int], size: tuple[int, int]) -> bytes:
+    """Assemble a minimal uncompressed big-endian 16-bit greyscale TIFF.
+
+    PIL cannot write one (it saves little-endian), and `MM` byte order is what
+    produces the `I;16B` mode this module has to cope with, so the file is
+    built by hand: 8-byte header, pixel data, then the IFD.
+
+    Args:
+        values: Row-major sample values, one per pixel.
+        size: `(width, height)`, matching the number of values.
+
+    Returns:
+        The TIFF file's bytes.
+    """
+    width, height = size
+    pixels = b"".join(struct.pack(">H", value) for value in values)
+
+    def entry(tag: int, field_type: int, value: int) -> bytes:
+        # SHORT values sit in the first two bytes of the four-byte value field.
+        payload = (
+            struct.pack(">HH", value, 0)
+            if field_type == 3
+            else struct.pack(">I", value)
+        )
+        return struct.pack(">HHI", tag, field_type, 1) + payload
+
+    entries = [
+        entry(256, 3, width),  # ImageWidth
+        entry(257, 3, height),  # ImageLength
+        entry(258, 3, 16),  # BitsPerSample
+        entry(259, 3, 1),  # Compression: none
+        entry(262, 3, 1),  # PhotometricInterpretation: black is zero
+        entry(273, 4, 8),  # StripOffsets: straight after the header
+        entry(277, 3, 1),  # SamplesPerPixel
+        entry(278, 3, height),  # RowsPerStrip
+        entry(279, 4, len(pixels)),  # StripByteCounts
+    ]
+    ifd = struct.pack(">H", len(entries)) + b"".join(entries) + struct.pack(">I", 0)
+    return b"MM\x00\x2a" + struct.pack(">I", 8 + len(pixels)) + pixels + ifd
+
+
+def _two_frame_gif() -> Image.Image:
+    """Open a freshly built two-frame GIF: frame 0 red, frame 1 blue."""
+    frames = []
+    for index in (0, 1):
+        # Distinct palettes, or PIL's GIF writer notices the frames are
+        # identical and collapses them into one.
+        frame = Image.new("P", (32, 32), index)
+        frame.putpalette([255, 0, 0, 0, 0, 255] + [0, 0, 0] * 254)
+        frames.append(frame)
+    buffer = io.BytesIO()
+    frames[0].save(buffer, format="GIF", save_all=True, append_images=frames[1:])
+    animation = Image.open(io.BytesIO(buffer.getvalue()))
+    assert getattr(animation, "n_frames", 1) == 2
+    return animation
+
+
 @pytest.mark.parametrize("mode", sorted(_MODE_FILLS))
 def test_every_mode_produces_a_decodable_rgb_jpeg(mode: str) -> None:
     image = Image.new(mode, (48, 32), _MODE_FILLS[mode])
@@ -90,6 +167,17 @@ def test_transparent_rgba_region_becomes_white() -> None:
     decoded = _decode(prepare_image(image, max_size=None))
 
     _assert_close(_pixel(decoded, (16, 16)), _RED)
+    _assert_close(_pixel(decoded, (48, 16)), _WHITE)
+
+
+def test_premultiplied_la_is_flattened_onto_white() -> None:
+    # PIL refuses La -> RGBA outright, so this exercises the LA detour.
+    image = Image.new("La", (64, 32), (140, 255))
+    image.paste((0, 0), (32, 0, 64, 32))
+
+    decoded = _decode(prepare_image(image, max_size=None))
+
+    _assert_close(_pixel(decoded, (16, 16)), (140, 140, 140))
     _assert_close(_pixel(decoded, (48, 16)), _WHITE)
 
 
@@ -115,13 +203,47 @@ def test_palette_without_transparency_keeps_its_colours() -> None:
     decoded = _decode(prepare_image(image, max_size=None))
 
     _assert_close(_pixel(decoded, (16, 16)), _RED)
-    _assert_close(_pixel(decoded, (48, 16)), (0, 0, 255))
+    _assert_close(_pixel(decoded, (48, 16)), _BLUE)
+
+
+def test_rgb_colour_key_transparency_is_flattened() -> None:
+    # PNG tRNS on a truecolour image: the key arrives as info["transparency"]
+    # with the mode still RGB, so mode alone is not enough to spot it.
+    source = Image.new("RGB", (64, 32), _RED)
+    source.paste(_BLUE, (32, 0, 64, 32))
+    buffer = io.BytesIO()
+    source.save(buffer, format="PNG", transparency=_BLUE)
+    image = Image.open(io.BytesIO(buffer.getvalue()))
+    assert image.mode == "RGB"
+
+    decoded = _decode(prepare_image(image, max_size=None))
+
+    _assert_close(_pixel(decoded, (16, 16)), _RED)
+    _assert_close(_pixel(decoded, (48, 16)), _WHITE)
+
+
+def test_greyscale_colour_key_transparency_is_flattened() -> None:
+    source = Image.new("L", (64, 32), 40)
+    source.paste(200, (32, 0, 64, 32))
+    buffer = io.BytesIO()
+    source.save(buffer, format="PNG", transparency=200)
+    image = Image.open(io.BytesIO(buffer.getvalue()))
+    assert image.mode == "L"
+
+    decoded = _decode(prepare_image(image, max_size=None))
+
+    _assert_close(_pixel(decoded, (16, 16)), (40, 40, 40))
+    _assert_close(_pixel(decoded, (48, 16)), _WHITE)
 
 
 @pytest.mark.parametrize(
     ("mode", "values"),
     [
         ("I;16", (0, 32768, 65535)),
+        ("I;16L", (0, 32768, 65535)),
+        # I;16N is missing here on purpose: PIL's own I;16N unpacker is 8-bit,
+        # so nothing this library does can recover the high byte. It is still
+        # covered above as a mode that prepares without error.
         ("I", (0, 50000, 100000)),
         ("F", (-1.0, 0.0, 1.0)),
     ],
@@ -129,16 +251,22 @@ def test_palette_without_transparency_keeps_its_colours() -> None:
 def test_wide_modes_are_rescaled_rather_than_clipped(
     mode: str, values: Sequence[Any]
 ) -> None:
-    # convert("RGB") clips these to 0..255, which would render both of the two
-    # brighter bands as pure white; a linear rescale keeps them apart.
-    image = _banded(mode, values)
+    _assert_three_grey_bands(_decode(prepare_image(_banded(mode, values), None)))
+
+
+def test_big_endian_16bit_tiff_is_rescaled() -> None:
+    # I;16B rejects getextrema() and point() ("image has wrong mode"), so this
+    # is the file that used to come back as ImageError instead of a JPEG.
+    width, height = 96, 32
+    row = [0] * 32 + [32768] * 32 + [65535] * 32
+    tiff = _big_endian_16bit_tiff(row * height, (width, height))
+    image = Image.open(io.BytesIO(tiff))
+    assert image.mode == "I;16B"
 
     decoded = _decode(prepare_image(image, max_size=None))
 
-    dark, mid, light = (_pixel(decoded, (x, 16))[0] for x in (16, 48, 80))
-    assert dark < 40
-    assert 90 < mid < 165
-    assert light > 215
+    assert decoded.size == (width, height)
+    _assert_three_grey_bands(decoded)
 
 
 def test_constant_wide_image_does_not_divide_by_zero() -> None:
@@ -147,6 +275,50 @@ def test_constant_wide_image_does_not_divide_by_zero() -> None:
     decoded = _decode(prepare_image(image, max_size=None))
 
     _assert_close(_pixel(decoded, (24, 16)), (0, 0, 0))
+
+
+def test_infinite_float_samples_keep_the_finite_bands_visible() -> None:
+    # Normalising against an infinite maximum would black out every finite
+    # sample; the fallback clamps instead, which at least stays legible.
+    image = _banded("F", (0.0, 200.0, float("inf")))
+
+    decoded = _decode(prepare_image(image, max_size=None))
+
+    dark, mid, light = (_pixel(decoded, (x, 16))[0] for x in (16, 48, 80))
+    assert dark < 40
+    assert 150 < mid < 230
+    assert light > 215
+
+
+def test_nan_float_samples_still_produce_a_jpeg() -> None:
+    image = _banded("F", (0.0, 200.0, float("nan")))
+
+    decoded = _decode(prepare_image(image, max_size=None))
+
+    assert decoded.size == (96, 32)
+
+
+def test_exif_orientation_is_applied_before_conversion() -> None:
+    # A phone photo: stored landscape, tagged "rotate 90° clockwise".
+    source = Image.new("RGB", (64, 32), _RED)
+    source.paste(_BLUE, (32, 0, 64, 32))
+    exif = source.getexif()
+    exif[_ORIENTATION_TAG] = 6
+    buffer = io.BytesIO()
+    source.save(buffer, format="JPEG", exif=exif, quality=95)
+    image = Image.open(io.BytesIO(buffer.getvalue()))
+    assert image.size == (64, 32)
+
+    decoded = _decode(prepare_image(image, max_size=None))
+
+    assert decoded.size == (32, 64)
+    _assert_close(_pixel(decoded, (16, 16)), _RED)
+    _assert_close(_pixel(decoded, (16, 48)), _BLUE)
+    # The rotation is baked into the pixels, so the tag must not travel with
+    # them, and the caller's image is left as it was found.
+    assert dict(decoded.getexif()) == {}
+    assert image.size == (64, 32)
+    assert image.getexif()[_ORIENTATION_TAG] == 6
 
 
 @pytest.mark.parametrize(
@@ -182,22 +354,24 @@ def test_the_callers_image_is_left_alone(mode: str) -> None:
 
 
 def test_multi_frame_gif_uses_the_first_frame() -> None:
-    # Distinct palettes, or PIL's GIF writer notices the frames are identical
-    # and collapses them into one.
-    frames = []
-    for index in (0, 1):
-        frame = Image.new("P", (32, 32), index)
-        frame.putpalette([255, 0, 0, 0, 0, 255] + [0, 0, 0] * 254)
-        frames.append(frame)
-    buffer = io.BytesIO()
-    frames[0].save(buffer, format="GIF", save_all=True, append_images=frames[1:])
-    animation = Image.open(io.BytesIO(buffer.getvalue()))
-    assert getattr(animation, "n_frames", 1) == 2
+    animation = _two_frame_gif()
 
     decoded = _decode(prepare_image(animation, max_size=None))
 
     assert decoded.size == (32, 32)
+    _assert_close(_pixel(decoded, (16, 16)), _RED)
     assert animation.tell() == 0
+
+
+def test_seeked_gif_prepares_the_current_frame() -> None:
+    animation = _two_frame_gif()
+    animation.seek(1)
+
+    decoded = _decode(prepare_image(animation, max_size=None))
+
+    _assert_close(_pixel(decoded, (16, 16)), _BLUE)
+    # Preparing an image must not rewind the caller's animation.
+    assert animation.tell() == 1
 
 
 @pytest.mark.parametrize("size", [(0, 0), (0, 10), (10, 0)])
@@ -214,11 +388,19 @@ def test_non_image_argument_raises_type_error(argument: object) -> None:
         prepare_image(argument)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("max_size", [True, 1.5, float("nan"), float("inf")])
+def test_non_integer_max_size_raises_type_error(max_size: object) -> None:
+    image = Image.new("RGB", (40, 30))
+
+    with pytest.raises(TypeError, match="max_size must be an int"):
+        prepare_image(image, max_size=max_size)  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize("max_size", [0, -1])
 def test_non_positive_max_size_is_rejected(max_size: int) -> None:
     image = Image.new("RGB", (40, 30))
 
-    with pytest.raises(ValueError, match="max_size"):
+    with pytest.raises(ValueError, match="max_size must be at least"):
         prepare_image(image, max_size=max_size)
 
 

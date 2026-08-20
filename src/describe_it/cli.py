@@ -6,7 +6,7 @@ CLI work unit, once there is a describer for it to drive.
 """
 
 
-def main() -> int:  # pragma: no cover - stub until the CLI work unit
+def main() -> int:
     """Run the describe-it command line.
 
     Returns:
