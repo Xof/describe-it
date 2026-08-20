@@ -16,6 +16,7 @@ real socket timeouts.
 
 import base64
 import json
+import math
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from http import HTTPStatus
@@ -87,9 +88,11 @@ class OllamaClient:
             raise TypeError(
                 f"timeout must be a number of seconds, not {type(timeout).__name__}"
             )
-        if timeout <= 0:
+        # inf and nan both slip past a plain `<= 0`: nan loses every comparison,
+        # and an infinite timeout is a hang with extra steps.
+        if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError(
-                f"timeout must be a positive number of seconds, not {timeout}"
+                f"timeout must be a positive, finite number of seconds, not {timeout}"
             )
         self.host = normalise_host(host)
         self.timeout = timeout
@@ -365,8 +368,11 @@ class OllamaClient:
         if exc.code == HTTPStatus.NOT_FOUND and _names_a_missing_model(raw):
             return ModelNotFoundError(model)
         body = _truncate(raw)
+        # A Location header only means a redirect on a 3xx. Error pages carry
+        # one often enough — a 500 from a proxy that would rather you logged in
+        # — and reporting that as a redirect would send the reader after it.
         redirect = exc.headers.get("Location")
-        if redirect is not None:
+        if _is_redirect(exc.code) and redirect is not None:
             # Redirects are not followed (see `_build_opener`), so this is a
             # dead end rather than a step on the way somewhere. Naming the
             # target is the whole diagnosis: it is nearly always a host that
@@ -430,6 +436,18 @@ class OllamaClient:
             message reads as a diagnosis rather than as a category.
         """
         return f"{operation} request for model {model!r} on {self.host}"
+
+
+def _is_redirect(status: int) -> bool:
+    """Report whether a status code is one of the redirection statuses.
+
+    Args:
+        status: The HTTP status the server answered with.
+
+    Returns:
+        True for 3xx.
+    """
+    return HTTPStatus.MULTIPLE_CHOICES <= status < HTTPStatus.BAD_REQUEST
 
 
 def _build_opener() -> OpenerDirector:

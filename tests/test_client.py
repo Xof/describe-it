@@ -118,18 +118,21 @@ def test_chat_reaches_the_server_however_the_host_is_spelled(
         ("http://x:1/", "http://x:1"),
         ("http://x:1///", "http://x:1"),
         ("  localhost:11434  ", "http://localhost:11434"),
-        # A host with no port means Ollama's port, as it does to Ollama's own
-        # CLI -- not port 80, where a web server usually answers.
+        # A scheme-less host with no port means Ollama's port, because that is
+        # what OLLAMA_HOST=localhost means to Ollama's own CLI.
         ("localhost", "http://localhost:11434"),
-        ("http://ollama.example.com", "http://ollama.example.com:11434"),
-        ("https://h", "https://h:443"),
-        ("https://ollama.example.com/", "https://ollama.example.com:443"),
         ("h:1", "http://h:1"),
         ("[::1]", "http://[::1]:11434"),
+        # A host written as a URL is used as written: no port means the
+        # scheme's own default, exactly as it does everywhere else.
+        ("http://ollama.example.com", "http://ollama.example.com"),
+        ("https://h", "https://h"),
+        ("https://ollama.example.com/", "https://ollama.example.com"),
+        ("https://h:8443", "https://h:8443"),
         # An uppercase scheme is the same scheme.
         ("HTTP://h:1", "http://h:1"),
         # A path survives: that is how an Ollama behind a prefix is addressed.
-        ("http://proxy/ollama/", "http://proxy:11434/ollama"),
+        ("http://proxy/ollama/", "http://proxy/ollama"),
         ("http://proxy:8080/ollama", "http://proxy:8080/ollama"),
     ],
 )
@@ -163,9 +166,10 @@ def test_normalise_host_always_produces_a_usable_base_url(
     # An absent scheme becomes http; a stated one survives untouched.
     expected_scheme = scheme.removesuffix("://") or "http"
     assert split.scheme == expected_scheme
-    # The port is always explicit afterwards: a stated one, or the default for
-    # the scheme -- 11434 for Ollama over http, 443 for https.
-    expected_port = port or f":{11434 if expected_scheme == 'http' else 443}"
+    # A port is filled in only for a host written without a scheme, which is
+    # the one form Ollama's CLI defines a default for. A URL keeps whatever
+    # port it was written with, including none.
+    expected_port = port or ("" if scheme else f":{11434}")
     assert split.netloc == f"{hostname}{expected_port}"
     # Round-trips, so appending a path to it produces a URL urllib can parse.
     assert urlunsplit(split) == normalised
@@ -638,7 +642,16 @@ def test_normalise_host_rejects_embedded_credentials(given_host: str) -> None:
 
 @pytest.mark.parametrize(
     "given_host",
-    ["http://h:1?debug=1", "http://h:1#frag", "http://h:1/ollama?x=1"],
+    [
+        "http://h:1?debug=1",
+        "http://h:1#frag",
+        "http://h:1/ollama?x=1",
+        # Empty ones parse as no query and no fragment at all, but the slash
+        # that introduced them survives -- and a base URL ending in a slash
+        # posts to "//api/chat".
+        "http://h:1/?",
+        "http://h:1/#",
+    ],
 )
 def test_normalise_host_rejects_a_query_string_or_fragment(given_host: str) -> None:
     with pytest.raises(ValueError, match="query string or fragment"):
@@ -655,3 +668,30 @@ def test_normalise_host_rejects_a_scheme_it_cannot_post_to(given_host: str) -> N
 def test_normalise_host_rejects_an_unreadable_port(given_host: str) -> None:
     with pytest.raises(ValueError, match="unreadable port"):
         normalise_host(given_host)
+
+
+def test_a_location_header_on_a_non_redirect_is_not_a_redirect(
+    server: FakeOllama,
+) -> None:
+    # Error pages carry a Location often enough -- a proxy that would rather
+    # you logged in -- and calling that a redirect sends the reader after it.
+    server.script(
+        "/api/chat",
+        status=500,
+        body=b'{"error": "internal"}',
+        headers=(("Location", "http://elsewhere.invalid/login"),),
+    )
+
+    with pytest.raises(OllamaResponseError, match="failed with HTTP 500") as caught:
+        _chat(OllamaClient(host=server.url))
+
+    assert "not followed" not in str(caught.value)
+    assert caught.value.status_code == 500
+
+
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf")])
+def test_a_timeout_that_is_not_finite_is_rejected(timeout: float) -> None:
+    # nan loses every comparison, so it slips past a plain "<= 0"; an infinite
+    # timeout is a hang with extra steps.
+    with pytest.raises(ValueError, match="positive, finite"):
+        OllamaClient(timeout=timeout)
