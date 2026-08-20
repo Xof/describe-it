@@ -427,3 +427,26 @@ and the configured Ollama host answers `/api/version`.
   every sample to 255 — so its bytes are reinterpreted as the explicit
   byte-order mode this machine uses (`sys.byteorder`) and it keeps full
   precision like the other two.
+
+### Errata (2026-08-20, found during unit 2)
+
+- §4: `OllamaClient` is also exported from the package, and `Describer` /
+  `describe()` accept a keyword-only `client=` argument. Both exist as a test
+  seam (the suite drives the real `urllib` path against an in-process HTTP
+  server and needs to inject a client bound to it); they are supported public
+  surface but not part of the "simple API" story.
+- §2.2: `OllamaClient(host=...)` defaults to the static
+  `http://localhost:11434`; `$OLLAMA_HOST` and `$DESCRIBE_IT_MODEL` are
+  resolved only by `Describer` / `describe()`, at call time. The transport
+  never reads ambient configuration.
+- §2.2/§2.3: `max_words < 1`, `timeout <= 0`, and `host=""` raise
+  `ValueError` at construction.
+- §2.3: `/api/pull` answers `200` and then an NDJSON `{"error": ...}` line
+  for a model that does not exist upstream; `ensure_model()` surfaces that as
+  `OllamaResponseError`, not `ModelNotFoundError` (which is reserved for "not
+  present on this server").
+- §2.7: `OllamaResponseError.status_code` is `None` only when no HTTP status
+  was obtained at all (malformed status line, reply truncated before
+  `Content-Length`, via `http.client.HTTPException`); an unparseable 2xx body
+  reports the real status. `ModelNotFoundError`'s message names the model and
+  the `ollama pull` remedy but not the host or operation.
