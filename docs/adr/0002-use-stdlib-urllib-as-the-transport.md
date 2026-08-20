@@ -35,8 +35,10 @@ dependency list is `pillow>=10` (spec §5).
 ## Consequences
 
 - The tests drive a real in-process `http.server` rather than a patched
-  `urlopen` (spec §5, §6.1), which is what makes 404 bodies, streamed NDJSON,
-  short reads and socket timeouts real rather than taught to a mock.
+  `urlopen`. Spec §5 names what that makes real — "404 bodies, malformed JSON,
+  and slow responses" — and spec §6.1 adds the streamed NDJSON of `pull` and a
+  handler that "sleeps past `timeout`". A body cut short of its declared
+  `Content-Length` is the unit-2 errata's addition (2026-08-20).
 - urllib's defaults had to be opted out of explicitly: the unit-2 errata
   (2026-08-20) and commit `24e3be2` record proxies being ignored and redirects
   not followed (ADR 0008).

@@ -14,9 +14,9 @@ From spec §1: "The API contract is deliberately minimal: **PIL image in,
 description string out, every failure is an exception.** No result objects, no
 status codes, no `None` returns."
 
-A caller still has to tell failures apart — spec §2.7 shapes the hierarchy "by
-what a caller would *do* about the failure, not by where the error happened to
-arise."
+A caller still has to tell failures apart, and the hierarchy is shaped for
+that. `exceptions.py` states the rule: "The tree is shaped by what a caller
+would *do* about the failure, not by where the error happened to arise."
 
 ## Decision
 
@@ -52,7 +52,7 @@ loop; module-level `describe()` is "sugar for
 ## Consequences
 
 - A refusal is an exception rather than a plausible-looking string (spec §2.6
-  step 5, ADR 0006); the cleaned text stays available on
+  step 5, ADR 0013); the cleaned text stays available on
   `DescriptionRefusedError.response`.
 - Every wrapped lower-level exception is chained with `raise ... from exc`, so
   the urllib, socket, JSON or Pillow original is on `__cause__` (spec §2.7).

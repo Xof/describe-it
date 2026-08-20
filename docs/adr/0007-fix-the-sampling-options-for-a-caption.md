@@ -41,8 +41,10 @@ safety stop, not the length control — the prompt is."
 
 ## Consequences
 
-- Output is not reproducible run to run, so the live tests assert structure
-  only (spec §6.2, ADR 0010).
+- Output is not reproducible run to run. Spec §6.2 does require the live tests
+  to assert structure only, but for a reason of its own — small models "are not
+  reliable enough to gate on" — and the sources do not connect that requirement
+  to this setting.
 - `num_predict` scales with `max_words`, so raising the caller's word budget
   raises the stop with it; nothing else needs adjusting.
 - Length is requested, never enforced: spec §2.2 describes `max_words` as

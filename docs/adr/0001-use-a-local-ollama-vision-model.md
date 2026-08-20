@@ -47,6 +47,7 @@ that defaults to `http://localhost:11434` (spec §2.2).
   not reliable enough to gate on" (ADR 0010).
 - The library's whole job is three JSON POSTs (spec §5), which is what makes
   the stdlib transport in ADR 0002 sufficient.
-- "Local" is the default, not a guarantee: `host` accepts any HTTP or HTTPS
-  URL, and the unit-2 errata (2026-08-20) records that a remote Ollama behind
-  a reverse proxy is a supported deployment.
+- "Local" is the default, not a guarantee. Spec §2.2 defines `host` as the
+  "Base URL of the Ollama server", and `config.py` keeps an explicit scheme and
+  path as written, noting that "`https://` is preserved because a remote Ollama
+  behind a reverse proxy is a real deployment" (ADR 0012).
